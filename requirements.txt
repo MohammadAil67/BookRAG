@@ -1,0 +1,7 @@
+langchain>=0.1.0
+langchain-community>=0.0.20
+langchain-core>=0.1.20
+langchainhub>=0.1.14
+chromadb>=0.4.22
+tiktoken>=0.5.2
+requests>=2.31.0
