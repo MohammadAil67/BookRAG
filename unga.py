@@ -5,10 +5,12 @@ import time
 import shutil
 import json
 from datetime import datetime
+import subprocess
 from pdf2image import convert_from_path
 import pytesseract
+from langchain_chroma import Chroma 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.documents import Document
@@ -18,6 +20,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from sentence_transformers import SentenceTransformer
 from typing import Any, List, Optional
 import google.generativeai as genai
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 # ----------------------
 # 0️⃣ Configuration
@@ -27,7 +30,7 @@ CACHE_FILE = "answers_cache.json"
 PDF_PATH = "Dakhil - 2018 - Class-(9-10) English For Today PDF Web.pdf"
 TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 POPPLER_PATH = r'C:\poppler\Library\bin'
-API_KEY = "AIzaSyD3b3sUEL89Z2SyMQxs0ONaP16WAk1BeMI"
+API_KEY = "AIzaSyDhG3i6a1GAP04LKkgA5Plie4nZLbFuoZI"
 
 # Function to safely clear Chroma database
 def clear_chroma_db(chroma_dir, max_attempts=3):
@@ -56,23 +59,27 @@ os.environ["GOOGLE_API_KEY"] = API_KEY
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 # ----------------------
-# 2️⃣ Local Embeddings (No API limits!)
+# 2️⃣ Google Gemini Embeddings
 # ----------------------
-class LocalEmbeddings(Embeddings):
+class GeminiEmbeddings(Embeddings):
     def __init__(self):
-        print("📦 Loading local embedding model...")
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
-        print("✅ Embedding model loaded!")
+        print("📦 Initializing Gemini embedding model...")
+        self.embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-001",
+            google_api_key=API_KEY,
+            task_type="retrieval_document"
+        )
+        print("✅ Gemini embedding model ready!")
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        print(f"🔄 Embedding {len(texts)} documents locally...")
-        return self.model.encode(texts, show_progress_bar=True).tolist()
+        print(f"🔄 Embedding {len(texts)} documents with Gemini...")
+        return self.embeddings.embed_documents(texts)
     
     def embed_query(self, text: str) -> List[float]:
-        return self.model.encode([text])[0].tolist()
+        return self.embeddings.embed_query(text)
 
 # ----------------------
-# 3️⃣ Rate-Limited Gemini 2.0 Flash LLM
+# 3️⃣ Rate-Limited Gemini 2.5 Flash LLM
 # ----------------------
 class GeminiLLM(LLM):
     model_name: str = "models/gemini-2.5-flash"  # Latest stable model
@@ -85,12 +92,7 @@ class GeminiLLM(LLM):
     def _llm_type(self) -> str:
         return "gemini"
     
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> str:
+    def _call(self,prompt: str,stop: Optional[List[str]] = None,**kwargs: Any,) -> str:
         # Rate limiting: ensure minimum delay between calls
         if self.last_call_time:
             elapsed = time.time() - self.last_call_time
@@ -157,18 +159,50 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
+
+# ----------------------
+#  Dynamic PDF Page Count
+# ----------------------
+
+def get_pdf_page_count(pdf_path, poppler_path):
+    """Get the total number of pages in a PDF"""
+    try:
+        pdfinfo_path = os.path.join(poppler_path, 'pdfinfo.exe')
+        result = subprocess.run(
+            [pdfinfo_path, pdf_path],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        for line in result.stdout.split('\n'):
+            if line.startswith('Pages:'):
+                return int(line.split(':')[1].strip())
+    except Exception as e:
+        print(f"⚠️ Could not get page count: {e}")
+        return None
+
+
+
 # ----------------------
 # 5️⃣ OCR PDF → chunked text
 # ----------------------
-def process_pdf(pdf_path, start_page=1, end_page=210):
+def process_pdf(pdf_path, start_page=1, end_page=None): 
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
     os.makedirs("page_images", exist_ok=True)
+
+    if end_page is None:
+        end_page = get_pdf_page_count(pdf_path, POPPLER_PATH)
+        if end_page is None:
+            raise ValueError("Could not determine PDF page count. Please specify end_page manually.")
+        print(f"📊 Detected {end_page} total pages in PDF")    
     
     all_text = []
     all_images = []
     
     print(f"\n📄 Processing PDF: {pdf_path}")
     print(f"   Pages: {start_page} to {end_page}")
+
+
     
     for batch_start in range(start_page, end_page + 1, 5):
         batch_end = min(batch_start + 4, end_page)
@@ -210,17 +244,16 @@ def build_vectorstore(all_text):
     
     print(f"✅ Created {len(chunks)} text chunks")
     
-    print(f"\n🔧 Building vector store with local embeddings...")
-    embeddings = LocalEmbeddings()
+    print(f"\n🔧 Building vector store with Gemini embeddings...")
+    embeddings = GeminiEmbeddings()
     
     vectorstore = Chroma.from_documents(
         documents=docs, 
         embedding=embeddings,
-        persist_directory=CHROMA_DIR,
-        collection_name="pdf_collection"
+        persist_directory=CHROMA_DIR
     )
     
-    print("✅ Vector store created successfully!")
+    print(f"✅ Vector store created with {len(chunks)} chunks")
     return vectorstore
 
 # ----------------------
@@ -229,7 +262,7 @@ def build_vectorstore(all_text):
 def setup_rag_chain(vectorstore):
     # Reduce number of retrieved documents to minimize API calls
     retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 3}  # Only top 3 most relevant chunks
+        search_kwargs={"k": 5}  # Only top 5 most relevant chunks
     )
     
     def format_docs(docs):
@@ -306,7 +339,7 @@ def main():
     # Process PDF (or load existing vectorstore)
     if os.path.exists(CHROMA_DIR):
         print(f"\n✅ Found existing vector store at {CHROMA_DIR}")
-        embeddings = LocalEmbeddings()
+        embeddings = GeminiEmbeddings()
         vectorstore = Chroma(
             persist_directory=CHROMA_DIR,
             embedding_function=embeddings,
