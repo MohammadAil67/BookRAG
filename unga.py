@@ -12,6 +12,7 @@ from sentence_transformers import SentenceTransformer
 import google.api_core.exceptions
 from typing import List, Tuple, Optional
 import google.generativeai as genai
+import subprocess  # Add this with your other imports
 from sklearn.metrics.pairwise import cosine_similarity
 import hashlib
 
@@ -319,13 +320,22 @@ def save_cache(cache):
 # ----------------------
 # 7️⃣ OCR PDF → Chunks
 # ----------------------
-def process_pdf(pdf_path, start_page=1, end_page=210):
+def process_pdf(pdf_path, poppler_path, start_page=1, end_page=None):
+    """
+    Process PDF with OCR - automatically detects page count if not specified
+    """
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
     os.makedirs("page_images", exist_ok=True)
     
+    # Auto-detect page count using pdfinfo if not specified
+    if end_page is None:
+        end_page = get_pdf_page_count_fast(pdf_path, poppler_path)
+        if end_page is None:
+            raise ValueError("Could not determine PDF page count using pdfinfo")
+    
     all_text = []
     
-    print(f"\n📄 Processing PDF: {pdf_path}")
+    print(f"\n📄 Processing PDF with OCR: {pdf_path}")
     print(f"   Pages: {start_page} to {end_page}")
     
     for batch_start in range(start_page, end_page + 1, 5):
@@ -336,7 +346,7 @@ def process_pdf(pdf_path, start_page=1, end_page=210):
             pdf_path,
             first_page=batch_start,
             last_page=batch_end,
-            poppler_path=POPPLER_PATH,
+            poppler_path=poppler_path,
             dpi=200
         )
         
@@ -354,7 +364,7 @@ def create_chunks(all_text):
     full_text = "\n\n".join(all_text)
     
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
+        chunk_size=500, 
         chunk_overlap=200
     )
     chunks = text_splitter.split_text(full_text)
@@ -399,6 +409,54 @@ def load_chunks_and_embeddings():
     print(f"✅ Loaded {len(chunks)} chunks with embeddings")
     return chunks, embeddings
 
+def get_pdf_page_count_fast(pdf_path, poppler_path):
+    """
+    Fast page count using pdfinfo from Poppler (same tool used for OCR)
+    No additional dependencies needed!
+    
+    Args:
+        pdf_path: Path to the PDF file
+        poppler_path: Path to poppler bin directory (e.g., r'C:\poppler\Library\bin')
+    
+    Returns:
+        int: Number of pages, or None if failed
+    """
+    try:
+        # Construct path to pdfinfo executable
+        pdfinfo_exe = os.path.join(poppler_path, 'pdfinfo.exe')
+        
+        # Check if pdfinfo exists
+        if not os.path.exists(pdfinfo_exe):
+            print(f"❌ pdfinfo not found at: {pdfinfo_exe}")
+            return None
+        
+        # Run pdfinfo command
+        result = subprocess.run(
+            [pdfinfo_exe, pdf_path],
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding='utf-8'
+        )
+        
+        # Parse output for page count
+        for line in result.stdout.split('\n'):
+            if line.startswith('Pages:'):
+                page_count = int(line.split(':')[1].strip())
+                print(f"📊 Detected {page_count} total pages in PDF (using pdfinfo)")
+                return page_count
+        
+        print("⚠️ Could not find 'Pages:' in pdfinfo output")
+        return None
+        
+    except subprocess.CalledProcessError as e:
+        print(f"❌ pdfinfo command failed: {e}")
+        print(f"   stderr: {e.stderr}")
+        return None
+    except Exception as e:
+        print(f"❌ Error reading PDF metadata: {e}")
+        return None
+
 # ----------------------
 # 9️⃣ Optimized Two-Stage Retrieval
 # ----------------------
@@ -409,7 +467,7 @@ def optimized_two_stage_retrieval(
     minilm_embedder: LocalEmbeddings,
     gemini_embedder: OptimizedGeminiEmbeddings,
     top_k_stage1: int = 50,
-    top_k_stage2: int = 3
+    top_k_stage2: int = 5
 ) -> Tuple[List[str], List[float]]:
     """
     Optimized two-stage retrieval with:
@@ -520,12 +578,8 @@ def ask_question(
         minilm_embedder=minilm_embedder,
         gemini_embedder=gemini_embedder,
         top_k_stage1=50,
-        top_k_stage2=3
+        top_k_stage2=5
     )
-    
-    # Add delay between embedding and LLM call
-    print(f"\n⏸️  Waiting 15 seconds before LLM call to avoid rate limits...")
-    time.sleep(15)
     
     # Build context
     context = "\n\n".join([
@@ -573,6 +627,7 @@ def main():
     print("   • Cache Gemini embeddings permanently")
     print("   • Similarity threshold filtering")
     print("   • Semantic deduplication")
+    print("   • Fast page detection with pdfinfo")
     print("="*60)
     
     # Load cache
@@ -583,8 +638,8 @@ def main():
     chunks, minilm_embeddings = load_chunks_and_embeddings()
     
     if chunks is None:
-        # Process PDF and create chunks
-        all_text = process_pdf(PDF_PATH)
+        # ✅ CLEAN: process_pdf handles page count automatically using pdfinfo!
+        all_text = process_pdf(PDF_PATH, POPPLER_PATH)
         chunks = create_chunks(all_text)
         chunks, minilm_embeddings = embed_and_save_chunks(chunks)
     
@@ -599,8 +654,8 @@ def main():
     
     # Ask questions
     questions = [
-        "Summarize avajon's problem page",
-        "Give a full overview of the first lesson of unit 14 pleasure and purpose"
+        "Give me a brief overview of ferry boat",
+        "Solve the questions mentioned in meherjan and the greedy jamuna",
     ]
     
     for i, question in enumerate(questions):
@@ -633,6 +688,7 @@ def main():
     print(f"   • With batching: ~1-2 API calls per query (first run)")
     print(f"   • With caching: 0 embedding calls (subsequent runs)")
     print("="*60)
+
 
 if __name__ == "__main__":
     main()
