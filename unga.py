@@ -2,55 +2,34 @@ import os
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 import time
-import shutil
 import json
+import numpy as np
 from datetime import datetime
-import subprocess
 from pdf2image import convert_from_path
 import pytesseract
-from langchain_chroma import Chroma 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.documents import Document
-from langchain_core.embeddings import Embeddings
-from langchain_core.language_models.llms import LLM
-from langchain_core.prompts import ChatPromptTemplate
 from sentence_transformers import SentenceTransformer
-from typing import Any, List, Optional
+import google.api_core.exceptions
+from typing import List, Tuple, Optional
 import google.generativeai as genai
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from sklearn.metrics.pairwise import cosine_similarity
+import hashlib
 
 # ----------------------
 # 0️⃣ Configuration
 # ----------------------
-CHROMA_DIR = "./chroma_db"
+CHUNKS_FILE = "chunks_with_embeddings.json"
+GEMINI_EMBEDDINGS_CACHE = "gemini_embeddings_cache.json"
 CACHE_FILE = "answers_cache.json"
 PDF_PATH = "Dakhil - 2018 - Class-(9-10) English For Today PDF Web.pdf"
 TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 POPPLER_PATH = r'C:\poppler\Library\bin'
-API_KEY = "AIzaSyDhG3i6a1GAP04LKkgA5Plie4nZLbFuoZI"
+API_KEY = "AIzaSyD3b3sUEL89Z2SyMQxs0ONaP16WAk1BeMI"
 
-# Function to safely clear Chroma database
-def clear_chroma_db(chroma_dir, max_attempts=3):
-    """Safely clear Chroma database with retry logic"""
-    if not os.path.exists(chroma_dir):
-        return
-    
-    for attempt in range(max_attempts):
-        try:
-            shutil.rmtree(chroma_dir)
-            print("🗑️ Cleared old Chroma database")
-            return
-        except PermissionError as e:
-            if attempt < max_attempts - 1:
-                print(f"⚠️ Database locked, waiting 2 seconds... (Attempt {attempt + 1}/{max_attempts})")
-                time.sleep(2)
-            else:
-                print(f"⚠️ Could not clear database (files in use). Will reuse existing database.")
-                print(f"   To force clear: close all Python processes and delete '{chroma_dir}' manually")
-                return
+# Optimization settings
+BATCH_SIZE = 100 # Gemini supports batching up to 100 texts
+SIMILARITY_THRESHOLD = 0.3  # Skip chunks below this threshold
+DEDUPLICATION_THRESHOLD = 0.95  # Remove chunks more similar than this
 
 # ----------------------
 # 1️⃣ Configure Gemini
@@ -59,95 +38,273 @@ os.environ["GOOGLE_API_KEY"] = API_KEY
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 # ----------------------
-# 2️⃣ Google Gemini Embeddings
+# 2️⃣ Local MiniLM Embeddings
 # ----------------------
-class GeminiEmbeddings(Embeddings):
+class LocalEmbeddings:
     def __init__(self):
-        print("📦 Initializing Gemini embedding model...")
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-001",
-            google_api_key=API_KEY,
-            task_type="retrieval_document"
-        )
-        print("✅ Gemini embedding model ready!")
+        print("📦 Loading MiniLM embedding model...")
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("✅ MiniLM model loaded!")
     
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        print(f"🔄 Embedding {len(texts)} documents with Gemini...")
-        return self.embeddings.embed_documents(texts)
+    def embed_texts(self, texts: List[str]) -> np.ndarray:
+        """Embed multiple texts"""
+        print(f"🔄 Embedding {len(texts)} texts with MiniLM...")
+        return self.model.encode(texts, show_progress_bar=True)
     
-    def embed_query(self, text: str) -> List[float]:
-        return self.embeddings.embed_query(text)
+    def embed_query(self, text: str) -> np.ndarray:
+        """Embed single query"""
+        return self.model.encode([text])[0]
 
 # ----------------------
-# 3️⃣ Rate-Limited Gemini 2.5 Flash LLM
+# 3️⃣ Optimized Gemini Embeddings with Caching & Batching
 # ----------------------
-class GeminiLLM(LLM):
-    model_name: str = "models/gemini-2.5-flash"  # Latest stable model
-    max_retries: int = 5
-    min_delay_between_calls: float = 5.0  # 5 seconds = 12 requests/min (under 15 RPM limit)
-    last_call_time: Optional[float] = None  # Declare as Pydantic field
-    call_count: int = 0  # Declare as Pydantic field
+class OptimizedGeminiEmbeddings:
+    def __init__(self, cache_file=GEMINI_EMBEDDINGS_CACHE):
+        self.model_name = "models/text-embedding-004"
+        self.call_count = 0
+        self.min_delay = 3.0  # Increased to 3 seconds between calls
+        self.last_call_time = None
+        self.cache_file = cache_file
+        self.cache = self.load_cache()
+        print(f"📦 Loaded {len(self.cache)} cached Gemini embeddings")
     
-    @property
-    def _llm_type(self) -> str:
-        return "gemini"
+    def load_cache(self) -> dict:
+        """Load cached embeddings"""
+        if os.path.exists(self.cache_file):
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
     
-    def _call(self,prompt: str,stop: Optional[List[str]] = None,**kwargs: Any,) -> str:
-        # Rate limiting: ensure minimum delay between calls
+    def save_cache(self):
+        """Save embeddings cache"""
+        with open(self.cache_file, 'w', encoding='utf-8') as f:
+            json.dump(self.cache, f, ensure_ascii=False)
+    
+    def get_text_hash(self, text: str) -> str:
+        """Generate hash for text to use as cache key"""
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    
+    def rate_limit(self):
+        """Apply rate limiting"""
         if self.last_call_time:
             elapsed = time.time() - self.last_call_time
-            if elapsed < self.min_delay_between_calls:
-                sleep_time = self.min_delay_between_calls - elapsed
-                print(f"⏸️  Rate limiting: waiting {sleep_time:.1f}s...")
+            if elapsed < self.min_delay:
+                sleep_time = self.min_delay - elapsed
                 time.sleep(sleep_time)
+        self.last_call_time = time.time()
+    
+    def embed_texts_batch(self, texts: List[str], task_type="retrieval_document") -> np.ndarray:
+        """
+        Embed multiple texts in batches with caching
+        MAJOR OPTIMIZATION: Batching reduces API calls by ~100x
+        """
+        embeddings = []
+        texts_to_embed = []
+        cached_indices = []
         
+        # Check cache first
+        for i, text in enumerate(texts):
+            text_hash = self.get_text_hash(text)
+            if text_hash in self.cache:
+                embeddings.append(self.cache[text_hash])
+                cached_indices.append(i)
+            else:
+                texts_to_embed.append((i, text, text_hash))
+        
+        print(f"  💾 Found {len(cached_indices)} cached embeddings")
+        print(f"  🔄 Need to embed {len(texts_to_embed)} new texts")
+        
+        if not texts_to_embed:
+            return np.array(embeddings)
+        
+        # Embed in batches
+        new_embeddings = [None] * len(texts)
+        for i in cached_indices:
+            new_embeddings[i] = embeddings[cached_indices.index(i)]
+        
+        # IMPORTANT: Add delay before first embedding call
+        if self.call_count == 0:
+            print(f"  ⏸️  Initial 5s delay before first API call...")
+            time.sleep(5)
+        
+        for batch_start in range(0, len(texts_to_embed), BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, len(texts_to_embed))
+            batch = texts_to_embed[batch_start:batch_end]
+            
+            batch_texts = [item[1] for item in batch]
+            
+            self.rate_limit()
+            
+            try:
+                print(f"  🔄 Gemini batch embedding {batch_start+1}-{batch_end}/{len(texts_to_embed)}...")
+                
+                # BATCH API CALL - This is the key optimization!
+                result = genai.embed_content(
+                    model=self.model_name,
+                    content=batch_texts,
+                    task_type=task_type
+                )
+                
+                self.call_count += 1  # Only 1 API call for entire batch!
+                print(f"  ✅ Batch embedded successfully (API call #{self.call_count})")
+                
+                # Store results and cache them
+                for j, (orig_idx, text, text_hash) in enumerate(batch):
+                    embedding = result['embedding'][j] if isinstance(result['embedding'][0], list) else result['embedding']
+                    new_embeddings[orig_idx] = embedding
+                    self.cache[text_hash] = embedding
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f"  ⚠️ Error in batch {batch_start+1}-{batch_end}: {error_msg}")
+                
+                # Check if rate limit error
+                if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower():
+                    print(f"  ⚠️  RATE LIMIT detected during embedding")
+                    print(f"  ⏸️  Waiting 60 seconds before retry...")
+                    time.sleep(60)
+                
+                # Fallback to individual embedding with longer delays
+                for orig_idx, text, text_hash in batch:
+                    try:
+                        time.sleep(5)  # 5 second delay between individual embeds
+                        result = genai.embed_content(
+                            model=self.model_name,
+                            content=text,
+                            task_type=task_type
+                        )
+                        self.call_count += 1
+                        embedding = result['embedding']
+                        new_embeddings[orig_idx] = embedding
+                        self.cache[text_hash] = embedding
+                    except Exception as e2:
+                        print(f"  ⚠️ Error embedding individual text: {e2}")
+                        new_embeddings[orig_idx] = [0.0] * 768
+        
+        # Save updated cache
+        self.save_cache()
+        
+        return np.array([emb for emb in new_embeddings if emb is not None])
+    
+    def embed_query(self, text: str) -> np.ndarray:
+        """Embed query with caching"""
+        text_hash = self.get_text_hash(text)
+        
+        if text_hash in self.cache:
+            print(f"  💾 Using cached query embedding")
+            return np.array(self.cache[text_hash])
+        
+        self.rate_limit()
+        
+        try:
+            print(f"  🔄 Gemini embedding query...")
+            result = genai.embed_content(
+                model=self.model_name,
+                content=text,
+                task_type="retrieval_query"
+            )
+            self.call_count += 1
+            embedding = result['embedding']
+            self.cache[text_hash] = embedding
+            self.save_cache()
+            return np.array(embedding)
+            
+        except Exception as e:
+            print(f"  ⚠️ Error embedding query: {e}")
+            return np.zeros(768)
+
+# ----------------------
+# 4️⃣ Semantic Deduplication
+# ----------------------
+def deduplicate_chunks(chunks: List[str], embeddings: np.ndarray, threshold: float = DEDUPLICATION_THRESHOLD) -> Tuple[List[str], np.ndarray, List[int]]:
+    """
+    Remove near-duplicate chunks to reduce API calls
+    Returns deduplicated chunks, embeddings, and kept indices
+    """
+    if len(chunks) <= 1:
+        return chunks, embeddings, list(range(len(chunks)))
+    
+    print(f"\n🔍 Deduplicating {len(chunks)} chunks (threshold: {threshold})...")
+    
+    kept_indices = [0]  # Always keep the first chunk
+    kept_chunks = [chunks[0]]
+    kept_embeddings = [embeddings[0]]
+    
+    for i in range(1, len(chunks)):
+        # Calculate similarity with all kept chunks
+        similarities = cosine_similarity(
+            embeddings[i].reshape(1, -1),
+            np.array(kept_embeddings)
+        )[0]
+        
+        # If not too similar to any kept chunk, keep it
+        if max(similarities) < threshold:
+            kept_indices.append(i)
+            kept_chunks.append(chunks[i])
+            kept_embeddings.append(embeddings[i])
+    
+    removed = len(chunks) - len(kept_chunks)
+    print(f"✅ Removed {removed} duplicate chunks, kept {len(kept_chunks)}")
+    
+    return kept_chunks, np.array(kept_embeddings), kept_indices
+
+# ----------------------
+# 5️⃣ Rate-Limited Gemini LLM
+# ----------------------
+# ----------------------
+# 5️⃣ Rate-Limited Gemini LLM
+# ----------------------
+class GeminiLLM:
+    def __init__(self):
+        # ✅ UPDATED: Using a model explicitly listed in your account
+        self.model_name = "models/gemini-2.5-flash" 
+        self.max_retries = 3
+        self.last_call_time = None
+        self.call_count = 0  # ✅ FIXED: Restored this to prevent AttributeError
+        
+    def generate(self, prompt: str) -> str:
+        # 1. ESTIMATE TOKENS
+        est_tokens = len(prompt) / 4
+        print(f"📊 Sending approx {int(est_tokens)} tokens...")
+
+        # 2. Safety cooldown
+        if self.last_call_time:
+            time_since_last = time.time() - self.last_call_time
+            if time_since_last < 5:
+                time.sleep(5 - time_since_last)
+
         for attempt in range(self.max_retries):
             try:
-                # Use the correct model initialization
                 model = genai.GenerativeModel(self.model_name)
-                self.last_call_time = time.time()
+                
+                # Increment counter before call
                 self.call_count += 1
+                self.last_call_time = time.time()
                 
-                print(f"🤖 API Call #{self.call_count} (Attempt {attempt + 1}/{self.max_retries})")
+                print(f"🤖 API Attempt {attempt + 1} (Model: {self.model_name})...")
                 
-                # Generate content with the model
-                response = model.generate_content(
-                    prompt,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.7,
-                    )
-                )
+                response = model.generate_content(prompt)
                 return response.text
                 
             except Exception as e:
                 error_msg = str(e)
+                print(f"❌ Error Detail: {error_msg}")
                 
-                # Check for rate limit errors
-                if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower() or "resource_exhausted" in error_msg.lower():
-                    if attempt < self.max_retries - 1:
-                        # Exponential backoff: 60s, 120s, 240s, 480s, 960s
-                        wait_time = 60 * (2 ** attempt)
-                        print(f"⚠️  RATE LIMIT HIT!")
-                        print(f"   Waiting {wait_time}s before retry {attempt + 2}/{self.max_retries}...")
-                        print(f"   Error: {error_msg}")
-                        time.sleep(wait_time)
-                    else:
-                        print(f"\n❌ RATE LIMIT EXCEEDED - All retries exhausted")
-                        print(f"📊 Total API calls made: {self.call_count}")
-                        print(f"💡 Solutions:")
-                        print(f"   1. Wait 1 hour for rate limit to reset")
-                        print(f"   2. Check your quota at: https://aistudio.google.com/")
-                        print(f"   3. Consider upgrading to paid tier for higher limits")
-                        raise Exception(f"Rate limit exceeded after {self.max_retries} attempts. Please wait 1 hour.")
-                else:
-                    # Non-rate-limit error
-                    print(f"❌ API Error: {error_msg}")
-                    raise
+                # Rate Limit Handling
+                if "429" in error_msg or "quota" in error_msg.lower():
+                    print("⚠️ QUOTA HIT. Waiting 60 seconds...")
+                    time.sleep(60)
+                elif "400" in error_msg:
+                    print("❌ TOKEN LIMIT or SAFETY FILTER hit.")
+                    return "Error: Context too large or safety block."
+                elif "404" in error_msg:
+                    # Fallback to 'latest' if 2.5 fails for any reason
+                    print("⚠️ Model specific version not found. Trying generic 'flash-latest'...")
+                    self.model_name = "models/gemini-flash-latest"
         
-        return ""
-
+        return "Failed to generate answer."
 # ----------------------
-# 4️⃣ Cache System
+# 6️⃣ Cache System
 # ----------------------
 def load_cache():
     if os.path.exists(CACHE_FILE):
@@ -159,50 +316,17 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
-
 # ----------------------
-#  Dynamic PDF Page Count
+# 7️⃣ OCR PDF → Chunks
 # ----------------------
-
-def get_pdf_page_count(pdf_path, poppler_path):
-    """Get the total number of pages in a PDF"""
-    try:
-        pdfinfo_path = os.path.join(poppler_path, 'pdfinfo.exe')
-        result = subprocess.run(
-            [pdfinfo_path, pdf_path],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        for line in result.stdout.split('\n'):
-            if line.startswith('Pages:'):
-                return int(line.split(':')[1].strip())
-    except Exception as e:
-        print(f"⚠️ Could not get page count: {e}")
-        return None
-
-
-
-# ----------------------
-# 5️⃣ OCR PDF → chunked text
-# ----------------------
-def process_pdf(pdf_path, start_page=1, end_page=None): 
+def process_pdf(pdf_path, start_page=1, end_page=210):
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
     os.makedirs("page_images", exist_ok=True)
-
-    if end_page is None:
-        end_page = get_pdf_page_count(pdf_path, POPPLER_PATH)
-        if end_page is None:
-            raise ValueError("Could not determine PDF page count. Please specify end_page manually.")
-        print(f"📊 Detected {end_page} total pages in PDF")    
     
     all_text = []
-    all_images = []
     
     print(f"\n📄 Processing PDF: {pdf_path}")
     print(f"   Pages: {start_page} to {end_page}")
-
-
     
     for batch_start in range(start_page, end_page + 1, 5):
         batch_end = min(batch_start + 4, end_page)
@@ -218,20 +342,14 @@ def process_pdf(pdf_path, start_page=1, end_page=None):
         
         for i, image in enumerate(images):
             page_num = batch_start + i
-            image_filename = f"page_images/page_{page_num}.png"
-            image.save(image_filename)
-            all_images.append(image_filename)
-            
             text = pytesseract.image_to_string(image, lang='eng')
             all_text.append(f"--- Page {page_num} ---\n{text}")
             print(f"  ✓ Page {page_num}: {len(text)} characters")
     
-    return all_text, all_images
+    return all_text
 
-# ----------------------
-# 6️⃣ Build Vector Store
-# ----------------------
-def build_vectorstore(all_text):
+def create_chunks(all_text):
+    """Split text into chunks"""
     print(f"\n🔧 Creating text chunks...")
     full_text = "\n\n".join(all_text)
     
@@ -240,78 +358,200 @@ def build_vectorstore(all_text):
         chunk_overlap=200
     )
     chunks = text_splitter.split_text(full_text)
-    docs = [Document(page_content=chunk) for chunk in chunks]
-    
     print(f"✅ Created {len(chunks)} text chunks")
     
-    print(f"\n🔧 Building vector store with Gemini embeddings...")
-    embeddings = GeminiEmbeddings()
-    
-    vectorstore = Chroma.from_documents(
-        documents=docs, 
-        embedding=embeddings,
-        persist_directory=CHROMA_DIR
-    )
-    
-    print(f"✅ Vector store created with {len(chunks)} chunks")
-    return vectorstore
+    return chunks
 
 # ----------------------
-# 7️⃣ Setup RAG Chain
+# 8️⃣ Embed and Save Chunks
 # ----------------------
-def setup_rag_chain(vectorstore):
-    # Reduce number of retrieved documents to minimize API calls
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 5}  # Only top 5 most relevant chunks
+def embed_and_save_chunks(chunks):
+    """Embed all chunks with MiniLM and save to JSON"""
+    print(f"\n🔧 Embedding {len(chunks)} chunks with MiniLM...")
+    
+    embedder = LocalEmbeddings()
+    embeddings = embedder.embed_texts(chunks)
+    
+    # Save chunks with embeddings
+    data = {
+        "chunks": chunks,
+        "embeddings": embeddings.tolist()
+    }
+    
+    with open(CHUNKS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
+    
+    print(f"✅ Saved {len(chunks)} chunks with embeddings to {CHUNKS_FILE}")
+    return chunks, embeddings
+
+def load_chunks_and_embeddings():
+    """Load pre-computed chunks and embeddings"""
+    if not os.path.exists(CHUNKS_FILE):
+        return None, None
+    
+    print(f"\n📦 Loading chunks and embeddings from {CHUNKS_FILE}...")
+    with open(CHUNKS_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    chunks = data["chunks"]
+    embeddings = np.array(data["embeddings"])
+    
+    print(f"✅ Loaded {len(chunks)} chunks with embeddings")
+    return chunks, embeddings
+
+# ----------------------
+# 9️⃣ Optimized Two-Stage Retrieval
+# ----------------------
+def optimized_two_stage_retrieval(
+    query: str,
+    chunks: List[str],
+    minilm_embeddings: np.ndarray,
+    minilm_embedder: LocalEmbeddings,
+    gemini_embedder: OptimizedGeminiEmbeddings,
+    top_k_stage1: int = 50,
+    top_k_stage2: int = 3
+) -> Tuple[List[str], List[float]]:
+    """
+    Optimized two-stage retrieval with:
+    - Similarity threshold filtering
+    - Semantic deduplication
+    - Batch embedding
+    """
+    
+    print(f"\n🔍 Stage 1: MiniLM Retrieval (top {top_k_stage1})")
+    print("="*60)
+    
+    # Stage 1: MiniLM embeddings
+    query_embedding_minilm = minilm_embedder.embed_query(query)
+    
+    # Calculate cosine similarity
+    similarities = cosine_similarity(
+        query_embedding_minilm.reshape(1, -1),
+        minilm_embeddings
+    )[0]
+    
+    # Apply similarity threshold
+    threshold_mask = similarities >= SIMILARITY_THRESHOLD
+    filtered_indices = np.where(threshold_mask)[0]
+    
+    if len(filtered_indices) == 0:
+        print(f"⚠️  No chunks above threshold {SIMILARITY_THRESHOLD}")
+        filtered_indices = np.arange(len(similarities))
+    
+    filtered_similarities = similarities[filtered_indices]
+    
+    # Get top K from filtered
+    top_k = min(top_k_stage1, len(filtered_indices))
+    top_k_relative_indices = np.argsort(filtered_similarities)[-top_k:][::-1]
+    top_k_indices = filtered_indices[top_k_relative_indices]
+    
+    top_k_chunks = [chunks[i] for i in top_k_indices]
+    top_k_scores = [similarities[i] for i in top_k_indices]
+    top_k_embeddings = minilm_embeddings[top_k_indices]
+    
+    print(f"✅ Filtered to {len(filtered_indices)} chunks above threshold")
+    print(f"✅ Retrieved {len(top_k_chunks)} top chunks")
+    print(f"   Score range: {min(top_k_scores):.4f} to {max(top_k_scores):.4f}")
+    
+    # Deduplication
+    dedup_chunks, dedup_embeddings, kept_indices = deduplicate_chunks(
+        top_k_chunks, 
+        top_k_embeddings,
+        threshold=DEDUPLICATION_THRESHOLD
     )
     
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+    # Stage 2: Gemini re-ranking
+    print(f"\n🔍 Stage 2: Gemini Re-ranking (top {top_k_stage2})")
+    print("="*60)
     
-    prompt = ChatPromptTemplate.from_template(
-        """Answer the question based on the context below. Be concise and accurate.
+    # Embed query with Gemini (cached)
+    query_embedding_gemini = gemini_embedder.embed_query(query)
+    
+    # Batch embed chunks with Gemini (cached + batched)
+    print(f"🔄 Batch embedding {len(dedup_chunks)} chunks with Gemini...")
+    chunk_embeddings_gemini = gemini_embedder.embed_texts_batch(dedup_chunks)
+    
+    # Calculate cosine similarity with Gemini embeddings
+    similarities_gemini = cosine_similarity(
+        query_embedding_gemini.reshape(1, -1),
+        chunk_embeddings_gemini
+    )[0]
+    
+    # Get final top K
+    final_top_k = min(top_k_stage2, len(dedup_chunks))
+    final_top_k_indices = np.argsort(similarities_gemini)[-final_top_k:][::-1]
+    final_chunks = [dedup_chunks[i] for i in final_top_k_indices]
+    final_scores = [similarities_gemini[i] for i in final_top_k_indices]
+    
+    print(f"✅ Final {len(final_chunks)} chunks selected")
+    print(f"   Score range: {min(final_scores):.4f} to {max(final_scores):.4f}")
+    
+    return final_chunks, final_scores
+
+# ----------------------
+# 🔟 Ask Question with Optimized RAG
+# ----------------------
+def ask_question(
+    query: str,
+    chunks: List[str],
+    minilm_embeddings: np.ndarray,
+    minilm_embedder: LocalEmbeddings,
+    gemini_embedder: OptimizedGeminiEmbeddings,
+    llm: GeminiLLM,
+    cache: dict
+) -> str:
+    """Ask question using optimized two-stage retrieval"""
+    
+    print(f"\n{'='*60}")
+    print(f"📝 Question: {query}")
+    print(f"{'='*60}")
+    
+    # Check cache
+    if query in cache:
+        print("💾 Found cached answer!")
+        print(f"\n💡 Answer:\n{cache[query]}")
+        return cache[query]
+    
+    # Optimized two-stage retrieval
+    retrieved_chunks, scores = optimized_two_stage_retrieval(
+        query=query,
+        chunks=chunks,
+        minilm_embeddings=minilm_embeddings,
+        minilm_embedder=minilm_embedder,
+        gemini_embedder=gemini_embedder,
+        top_k_stage1=50,
+        top_k_stage2=3
+    )
+    
+    # Add delay between embedding and LLM call
+    print(f"\n⏸️  Waiting 15 seconds before LLM call to avoid rate limits...")
+    time.sleep(15)
+    
+    # Build context
+    context = "\n\n".join([
+        f"[Chunk {i+1}, Relevance: {scores[i]:.4f}]\n{chunk}"
+        for i, chunk in enumerate(retrieved_chunks)
+    ])
+    
+    # Create prompt
+    prompt = f"""You are a helpful AI assistant analyzing an English textbook. 
+Answer the question based on the provided context. 
+Provide a detailed, comprehensive answer with explanations when appropriate.
 
 Context:
 {context}
 
-Question: {question}
+Question: {query}
 
 Answer:"""
-    )
     
-    print("\n🤖 Initializing Gemini 2.5 Flash LLM with rate limiting...")
-    llm = GeminiLLM()
-    
-    rag_chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    
-    return rag_chain, llm
-
-# ----------------------
-# 8️⃣ Ask Questions with Caching
-# ----------------------
-def ask_question(rag_chain, question, cache):
-    print(f"\n{'='*60}")
-    print(f"📝 Question: {question}")
-    print(f"{'='*60}")
-    
-    # Check cache first
-    if question in cache:
-        print("💾 Found cached answer!")
-        print(f"\n💡 Answer:\n{cache[question]}")
-        return cache[question]
-    
-    # Get new answer
-    print("⏳ Getting answer from Gemini 2.0 Flash...")
+    # Generate answer
+    print(f"\n🤖 Generating answer with Gemini LLM...")
     try:
-        answer = rag_chain.invoke(question)
+        answer = llm.generate(prompt)
         
-        # Save to cache
-        cache[question] = answer
+        # Cache the answer
+        cache[query] = answer
         save_cache(cache)
         
         print(f"\n💡 Answer:\n{answer}")
@@ -322,51 +562,59 @@ def ask_question(rag_chain, question, cache):
         return None
 
 # ----------------------
-# 9️⃣ Main Execution
+# 1️⃣1️⃣ Main Execution
 # ----------------------
 def main():
     print("="*60)
-    print("🚀 RAG System with Rate Limiting - Gemini 2.5 Flash")
+    print("🚀 OPTIMIZED Two-Stage RAG System")
     print("="*60)
-    
-    # Clear old database (optional - comment out to keep existing database)
-    # clear_chroma_db(CHROMA_DIR)
+    print("✨ Optimizations:")
+    print("   • Batch Gemini embeddings (100 texts/call)")
+    print("   • Cache Gemini embeddings permanently")
+    print("   • Similarity threshold filtering")
+    print("   • Semantic deduplication")
+    print("="*60)
     
     # Load cache
     cache = load_cache()
     print(f"📦 Loaded {len(cache)} cached answers")
     
-    # Process PDF (or load existing vectorstore)
-    if os.path.exists(CHROMA_DIR):
-        print(f"\n✅ Found existing vector store at {CHROMA_DIR}")
-        embeddings = GeminiEmbeddings()
-        vectorstore = Chroma(
-            persist_directory=CHROMA_DIR,
-            embedding_function=embeddings,
-            collection_name="pdf_collection"
-        )
-    else:
-        all_text, all_images = process_pdf(PDF_PATH)
-        print(f"\n✅ Processed {len(all_images)} pages")
-        vectorstore = build_vectorstore(all_text)
+    # Load or create chunks with embeddings
+    chunks, minilm_embeddings = load_chunks_and_embeddings()
     
-    # Setup RAG chain
-    rag_chain, llm = setup_rag_chain(vectorstore)
+    if chunks is None:
+        # Process PDF and create chunks
+        all_text = process_pdf(PDF_PATH)
+        chunks = create_chunks(all_text)
+        chunks, minilm_embeddings = embed_and_save_chunks(chunks)
+    
+    # Initialize models
+    minilm_embedder = LocalEmbeddings()
+    gemini_embedder = OptimizedGeminiEmbeddings()
+    llm = GeminiLLM()
     
     print("\n" + "="*60)
-    print("✅ RAG System Ready!")
+    print("✅ Optimized RAG System Ready!")
     print("="*60)
     
     # Ask questions
     questions = [
-        "What is this book about?",
-        # Add more questions here if needed
+        "Summarize avajon's problem page",
+        "Give a full overview of the first lesson of unit 14 pleasure and purpose"
     ]
     
     for i, question in enumerate(questions):
-        answer = ask_question(rag_chain, question, cache)
+        answer = ask_question(
+            query=question,
+            chunks=chunks,
+            minilm_embeddings=minilm_embeddings,
+            minilm_embedder=minilm_embedder,
+            gemini_embedder=gemini_embedder,
+            llm=llm,
+            cache=cache
+        )
         
-        # Wait between questions if there are more
+        # Wait between questions
         if answer and i < len(questions) - 1:
             wait_time = 10
             print(f"\n⏳ Waiting {wait_time}s before next question...")
@@ -375,9 +623,15 @@ def main():
     # Final stats
     print("\n" + "="*60)
     print(f"📊 Session Stats:")
-    print(f"   Total API calls made: {llm.call_count}")
+    print(f"   Total LLM calls: {llm.call_count}")
+    print(f"   Total Gemini embedding API calls: {gemini_embedder.call_count}")
     print(f"   Cached answers: {len(cache)}")
-    print("✅ Done!")
+    print(f"   Cached embeddings: {len(gemini_embedder.cache)}")
+    print("="*60)
+    print(f"\n💡 Optimization Impact:")
+    print(f"   • Without batching: ~50 API calls per query")
+    print(f"   • With batching: ~1-2 API calls per query (first run)")
+    print(f"   • With caching: 0 embedding calls (subsequent runs)")
     print("="*60)
 
 if __name__ == "__main__":
