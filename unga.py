@@ -15,16 +15,20 @@ import google.generativeai as genai
 import subprocess  # Add this with your other imports
 from sklearn.metrics.pairwise import cosine_similarity
 import hashlib
+from GeminiEmebedding import OptimizedGeminiEmbeddings
+from PDFprocessing import PDFProcess
+
+from LocalEmbedds import LocalEmbeddings
 
 # ----------------------
 # 0️⃣ Configuration
 # ----------------------
-CHUNKS_FILE = "chunks_with_embeddings.json"
-GEMINI_EMBEDDINGS_CACHE = "gemini_embeddings_cache.json"
+
+
 CACHE_FILE = "answers_cache.json"
-PDF_PATH = "Dakhil - 2018 - Class-(9-10) English For Today PDF Web.pdf"
+PDF_PATH = "ENHANCING ENVIRONMENTAL SUSTAINABILITY IN ASIAN TEXTILE .pdf"
 TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-POPPLER_PATH = r'C:\poppler\Library\bin'
+POPPLER_PATH = r'C:\ProgramData\chocolatey\lib\poppler-25.12.0\Library\bin'
 API_KEY = "AIzaSyD3b3sUEL89Z2SyMQxs0ONaP16WAk1BeMI"
 
 # Optimization settings
@@ -38,181 +42,9 @@ DEDUPLICATION_THRESHOLD = 0.95  # Remove chunks more similar than this
 os.environ["GOOGLE_API_KEY"] = API_KEY
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
-# ----------------------
-# 2️⃣ Local MiniLM Embeddings
-# ----------------------
-class LocalEmbeddings:
-    def __init__(self):
-        print("📦 Loading MiniLM embedding model...")
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
-        print("✅ MiniLM model loaded!")
-    
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
-        """Embed multiple texts"""
-        print(f"🔄 Embedding {len(texts)} texts with MiniLM...")
-        return self.model.encode(texts, show_progress_bar=True)
-    
-    def embed_query(self, text: str) -> np.ndarray:
-        """Embed single query"""
-        return self.model.encode([text])[0]
 
-# ----------------------
-# 3️⃣ Optimized Gemini Embeddings with Caching & Batching
-# ----------------------
-class OptimizedGeminiEmbeddings:
-    def __init__(self, cache_file=GEMINI_EMBEDDINGS_CACHE):
-        self.model_name = "models/text-embedding-004"
-        self.call_count = 0
-        self.min_delay = 3.0  # Increased to 3 seconds between calls
-        self.last_call_time = None
-        self.cache_file = cache_file
-        self.cache = self.load_cache()
-        print(f"📦 Loaded {len(self.cache)} cached Gemini embeddings")
-    
-    def load_cache(self) -> dict:
-        """Load cached embeddings"""
-        if os.path.exists(self.cache_file):
-            with open(self.cache_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
-    
-    def save_cache(self):
-        """Save embeddings cache"""
-        with open(self.cache_file, 'w', encoding='utf-8') as f:
-            json.dump(self.cache, f, ensure_ascii=False)
-    
-    def get_text_hash(self, text: str) -> str:
-        """Generate hash for text to use as cache key"""
-        return hashlib.md5(text.encode('utf-8')).hexdigest()
-    
-    def rate_limit(self):
-        """Apply rate limiting"""
-        if self.last_call_time:
-            elapsed = time.time() - self.last_call_time
-            if elapsed < self.min_delay:
-                sleep_time = self.min_delay - elapsed
-                time.sleep(sleep_time)
-        self.last_call_time = time.time()
-    
-    def embed_texts_batch(self, texts: List[str], task_type="retrieval_document") -> np.ndarray:
-        """
-        Embed multiple texts in batches with caching
-        MAJOR OPTIMIZATION: Batching reduces API calls by ~100x
-        """
-        embeddings = []
-        texts_to_embed = []
-        cached_indices = []
-        
-        # Check cache first
-        for i, text in enumerate(texts):
-            text_hash = self.get_text_hash(text)
-            if text_hash in self.cache:
-                embeddings.append(self.cache[text_hash])
-                cached_indices.append(i)
-            else:
-                texts_to_embed.append((i, text, text_hash))
-        
-        print(f"  💾 Found {len(cached_indices)} cached embeddings")
-        print(f"  🔄 Need to embed {len(texts_to_embed)} new texts")
-        
-        if not texts_to_embed:
-            return np.array(embeddings)
-        
-        # Embed in batches
-        new_embeddings = [None] * len(texts)
-        for i in cached_indices:
-            new_embeddings[i] = embeddings[cached_indices.index(i)]
-        
-        # IMPORTANT: Add delay before first embedding call
-        if self.call_count == 0:
-            print(f"  ⏸️  Initial 5s delay before first API call...")
-            time.sleep(5)
-        
-        for batch_start in range(0, len(texts_to_embed), BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, len(texts_to_embed))
-            batch = texts_to_embed[batch_start:batch_end]
-            
-            batch_texts = [item[1] for item in batch]
-            
-            self.rate_limit()
-            
-            try:
-                print(f"  🔄 Gemini batch embedding {batch_start+1}-{batch_end}/{len(texts_to_embed)}...")
-                
-                # BATCH API CALL - This is the key optimization!
-                result = genai.embed_content(
-                    model=self.model_name,
-                    content=batch_texts,
-                    task_type=task_type
-                )
-                
-                self.call_count += 1  # Only 1 API call for entire batch!
-                print(f"  ✅ Batch embedded successfully (API call #{self.call_count})")
-                
-                # Store results and cache them
-                for j, (orig_idx, text, text_hash) in enumerate(batch):
-                    embedding = result['embedding'][j] if isinstance(result['embedding'][0], list) else result['embedding']
-                    new_embeddings[orig_idx] = embedding
-                    self.cache[text_hash] = embedding
-                
-            except Exception as e:
-                error_msg = str(e)
-                print(f"  ⚠️ Error in batch {batch_start+1}-{batch_end}: {error_msg}")
-                
-                # Check if rate limit error
-                if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower():
-                    print(f"  ⚠️  RATE LIMIT detected during embedding")
-                    print(f"  ⏸️  Waiting 60 seconds before retry...")
-                    time.sleep(60)
-                
-                # Fallback to individual embedding with longer delays
-                for orig_idx, text, text_hash in batch:
-                    try:
-                        time.sleep(5)  # 5 second delay between individual embeds
-                        result = genai.embed_content(
-                            model=self.model_name,
-                            content=text,
-                            task_type=task_type
-                        )
-                        self.call_count += 1
-                        embedding = result['embedding']
-                        new_embeddings[orig_idx] = embedding
-                        self.cache[text_hash] = embedding
-                    except Exception as e2:
-                        print(f"  ⚠️ Error embedding individual text: {e2}")
-                        new_embeddings[orig_idx] = [0.0] * 768
-        
-        # Save updated cache
-        self.save_cache()
-        
-        return np.array([emb for emb in new_embeddings if emb is not None])
-    
-    def embed_query(self, text: str) -> np.ndarray:
-        """Embed query with caching"""
-        text_hash = self.get_text_hash(text)
-        
-        if text_hash in self.cache:
-            print(f"  💾 Using cached query embedding")
-            return np.array(self.cache[text_hash])
-        
-        self.rate_limit()
-        
-        try:
-            print(f"  🔄 Gemini embedding query...")
-            result = genai.embed_content(
-                model=self.model_name,
-                content=text,
-                task_type="retrieval_query"
-            )
-            self.call_count += 1
-            embedding = result['embedding']
-            self.cache[text_hash] = embedding
-            self.save_cache()
-            return np.array(embedding)
-            
-        except Exception as e:
-            print(f"  ⚠️ Error embedding query: {e}")
-            return np.zeros(768)
+
+
 
 # ----------------------
 # 4️⃣ Semantic Deduplication
@@ -249,9 +81,6 @@ def deduplicate_chunks(chunks: List[str], embeddings: np.ndarray, threshold: flo
     
     return kept_chunks, np.array(kept_embeddings), kept_indices
 
-# ----------------------
-# 5️⃣ Rate-Limited Gemini LLM
-# ----------------------
 # ----------------------
 # 5️⃣ Rate-Limited Gemini LLM
 # ----------------------
@@ -317,145 +146,7 @@ def save_cache(cache):
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
-# ----------------------
-# 7️⃣ OCR PDF → Chunks
-# ----------------------
-def process_pdf(pdf_path, poppler_path, start_page=1, end_page=None):
-    """
-    Process PDF with OCR - automatically detects page count if not specified
-    """
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
-    os.makedirs("page_images", exist_ok=True)
-    
-    # Auto-detect page count using pdfinfo if not specified
-    if end_page is None:
-        end_page = get_pdf_page_count_fast(pdf_path, poppler_path)
-        if end_page is None:
-            raise ValueError("Could not determine PDF page count using pdfinfo")
-    
-    all_text = []
-    
-    print(f"\n📄 Processing PDF with OCR: {pdf_path}")
-    print(f"   Pages: {start_page} to {end_page}")
-    
-    for batch_start in range(start_page, end_page + 1, 5):
-        batch_end = min(batch_start + 4, end_page)
-        print(f"\n📖 Processing pages {batch_start} to {batch_end}...")
-        
-        images = convert_from_path(
-            pdf_path,
-            first_page=batch_start,
-            last_page=batch_end,
-            poppler_path=poppler_path,
-            dpi=200
-        )
-        
-        for i, image in enumerate(images):
-            page_num = batch_start + i
-            text = pytesseract.image_to_string(image, lang='eng')
-            all_text.append(f"--- Page {page_num} ---\n{text}")
-            print(f"  ✓ Page {page_num}: {len(text)} characters")
-    
-    return all_text
 
-def create_chunks(all_text):
-    """Split text into chunks"""
-    print(f"\n🔧 Creating text chunks...")
-    full_text = "\n\n".join(all_text)
-    
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500, 
-        chunk_overlap=200
-    )
-    chunks = text_splitter.split_text(full_text)
-    print(f"✅ Created {len(chunks)} text chunks")
-    
-    return chunks
-
-# ----------------------
-# 8️⃣ Embed and Save Chunks
-# ----------------------
-def embed_and_save_chunks(chunks):
-    """Embed all chunks with MiniLM and save to JSON"""
-    print(f"\n🔧 Embedding {len(chunks)} chunks with MiniLM...")
-    
-    embedder = LocalEmbeddings()
-    embeddings = embedder.embed_texts(chunks)
-    
-    # Save chunks with embeddings
-    data = {
-        "chunks": chunks,
-        "embeddings": embeddings.tolist()
-    }
-    
-    with open(CHUNKS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False)
-    
-    print(f"✅ Saved {len(chunks)} chunks with embeddings to {CHUNKS_FILE}")
-    return chunks, embeddings
-
-def load_chunks_and_embeddings():
-    """Load pre-computed chunks and embeddings"""
-    if not os.path.exists(CHUNKS_FILE):
-        return None, None
-    
-    print(f"\n📦 Loading chunks and embeddings from {CHUNKS_FILE}...")
-    with open(CHUNKS_FILE, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    chunks = data["chunks"]
-    embeddings = np.array(data["embeddings"])
-    
-    print(f"✅ Loaded {len(chunks)} chunks with embeddings")
-    return chunks, embeddings
-
-def get_pdf_page_count_fast(pdf_path, poppler_path):
-    """
-    Fast page count using pdfinfo from Poppler (same tool used for OCR)
-    No additional dependencies needed!
-    
-    Args:
-        pdf_path: Path to the PDF file
-        poppler_path: Path to poppler bin directory (e.g., r'C:\poppler\Library\bin')
-    
-    Returns:
-        int: Number of pages, or None if failed
-    """
-    try:
-        # Construct path to pdfinfo executable
-        pdfinfo_exe = os.path.join(poppler_path, 'pdfinfo.exe')
-        
-        # Check if pdfinfo exists
-        if not os.path.exists(pdfinfo_exe):
-            print(f"❌ pdfinfo not found at: {pdfinfo_exe}")
-            return None
-        
-        # Run pdfinfo command
-        result = subprocess.run(
-            [pdfinfo_exe, pdf_path],
-            capture_output=True,
-            text=True,
-            check=True,
-            encoding='utf-8'
-        )
-        
-        # Parse output for page count
-        for line in result.stdout.split('\n'):
-            if line.startswith('Pages:'):
-                page_count = int(line.split(':')[1].strip())
-                print(f"📊 Detected {page_count} total pages in PDF (using pdfinfo)")
-                return page_count
-        
-        print("⚠️ Could not find 'Pages:' in pdfinfo output")
-        return None
-        
-    except subprocess.CalledProcessError as e:
-        print(f"❌ pdfinfo command failed: {e}")
-        print(f"   stderr: {e.stderr}")
-        return None
-    except Exception as e:
-        print(f"❌ Error reading PDF metadata: {e}")
-        return None
 
 # ----------------------
 # 9️⃣ Optimized Two-Stage Retrieval
@@ -635,13 +326,13 @@ def main():
     print(f"📦 Loaded {len(cache)} cached answers")
     
     # Load or create chunks with embeddings
-    chunks, minilm_embeddings = load_chunks_and_embeddings()
+    chunks, minilm_embeddings = LocalEmbeddings.load_chunks_and_embeddings()
     
     if chunks is None:
         # ✅ CLEAN: process_pdf handles page count automatically using pdfinfo!
-        all_text = process_pdf(PDF_PATH, POPPLER_PATH)
-        chunks = create_chunks(all_text)
-        chunks, minilm_embeddings = embed_and_save_chunks(chunks)
+        all_text = PDFProcess.process_pdf(PDF_PATH, POPPLER_PATH)
+        chunks = PDFProcess.create_chunks(all_text)
+        chunks, minilm_embeddings = LocalEmbeddings.embed_and_save_chunks(chunks)
     
     # Initialize models
     minilm_embedder = LocalEmbeddings()
@@ -654,8 +345,7 @@ def main():
     
     # Ask questions
     questions = [
-        "Give me a brief overview of ferry boat",
-        "Solve the questions mentioned in meherjan and the greedy jamuna",
+        "What can a responsive system do to enhance environmental sustainability in the Asian textile and apparel industry?",
     ]
     
     for i, question in enumerate(questions):
