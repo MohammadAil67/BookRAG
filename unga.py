@@ -1,5 +1,4 @@
 import time
-import json
 import numpy as np
 from typing import List, Tuple, Optional
 import google.generativeai as genai
@@ -43,10 +42,10 @@ def find_poppler() -> Optional[str]:
     # Try common Windows locations
     common_paths = [
         r'C:\ProgramData\chocolatey\lib\poppler\Library\bin',
-        r'C:\Program Files\poppler\Library\bin',
+        r'C:\poppler\Library\bin',
     ]
     
-    for base_path in [r'C:\ProgramData\chocolatey\lib']:
+    for base_path in [r'C:']:
         if Path(base_path).exists():
             # Find any poppler version
             for folder in Path(base_path).iterdir():
@@ -64,9 +63,8 @@ def find_poppler() -> Optional[str]:
 
 #Will be using comments like this to separate each part of the logic
 
-# Cache and PDF paths - use environment variables with fallbacks
-CACHE_FILE = os.getenv("CACHE_FILE", "answers_cache.json")
-PDF_PATH = os.getenv("PDF_PATH", "ENHANCING ENVIRONMENTAL SUSTAINABILITY IN ASIAN TEXTILE .pdf")
+# PDF path - use environment variable with fallback
+PDF_PATH = os.getenv("PDF_PATH", "Dakhil - 2018 - Class-(9-10) English For Today PDF Web.pdf")
 
 # Auto-detect system paths
 TESSERACT_PATH = find_tesseract()
@@ -193,21 +191,6 @@ class GeminiLLM:
                     self.model_name = "models/gemini-flash-latest"
         
         return "Failed to generate answer."
-# ----------------------
-# 6️⃣ Cache System
-# ----------------------
-
-#Just the cache loading and saving logic
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_cache(cache):
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, indent=2, ensure_ascii=False)
-
 
 
 # ----------------------
@@ -312,20 +295,13 @@ def ask_question(
     minilm_embeddings: np.ndarray,
     minilm_embedder: LocalEmbeddings,
     gemini_embedder: OptimizedGeminiEmbeddings,
-    llm: GeminiLLM,
-    cache: dict
+    llm: GeminiLLM
 ) -> str:
     """Ask question using optimized two-stage retrieval"""
     
     print(f"\n{'='*60}")
     print(f"📝 Question: {query}")
     print(f"{'='*60}")
-    
-    # Check cache, failed logic, needs fixing
-    if query in cache:
-        print("💾 Found cached answer!")
-        print(f"\n💡 Answer:\n{cache[query]}")
-        return cache[query]
     
     # Optimized two-stage retrieval
     retrieved_chunks, scores = optimized_two_stage_retrieval(
@@ -346,24 +322,20 @@ def ask_question(
     
     # Create prompt
     prompt = f"""You are a helpful AI assistant analyzing an English textbook. 
-Answer the question based on the provided context. 
-Provide a detailed, comprehensive answer with explanations when appropriate.
+    Answer the question based on the provided context. 
+    Provide a detailed, comprehensive answer with explanations when appropriate.
 
-Context:
-{context}
+    Context:
+    {context}
 
-Question: {query}
+    Question: {query}
 
-Answer:"""
+    Answer:"""
     
     # Generate answer
     print(f"\n🤖 Generating answer with Gemini LLM...")
     try:
         answer = llm.generate(prompt)
-        
-        # Cache the answer
-        cache[query] = answer
-        save_cache(cache)
         
         print(f"\n💡 Answer:\n{answer}")
         return answer
@@ -386,10 +358,6 @@ def main():
     print("   • Semantic deduplication")
     print("   • Fast page detection with pdfinfo")
     print("="*60)
-    
-    # Load cache
-    cache = load_cache()
-    print(f"📦 Loaded {len(cache)} cached answers")
     
     # Load or create chunks with embeddings
     chunks, minilm_embeddings = LocalEmbeddings.load_chunks_and_embeddings()
@@ -431,8 +399,7 @@ def main():
             minilm_embeddings=minilm_embeddings,
             minilm_embedder=minilm_embedder,
             gemini_embedder=gemini_embedder,
-            llm=llm,
-            cache=cache
+            llm=llm
         )
         
         if not answer:
@@ -443,7 +410,6 @@ def main():
     print(f"📊 Session Stats:")
     print(f"   Total LLM calls: {llm.call_count}")
     print(f"   Total Gemini embedding API calls: {gemini_embedder.call_count}")
-    print(f"   Cached answers: {len(cache)}")
     print(f"   Cached embeddings: {len(gemini_embedder.cache)}")
     print("="*60)
 
