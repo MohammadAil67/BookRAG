@@ -1,35 +1,92 @@
-import os
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-
 import time
 import json
 import numpy as np
-from datetime import datetime
-from pdf2image import convert_from_path
-import pytesseract
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
-import google.api_core.exceptions
 from typing import List, Tuple, Optional
 import google.generativeai as genai
-import subprocess  # Add this with your other imports
 from sklearn.metrics.pairwise import cosine_similarity
-import hashlib
 from GeminiEmebedding import OptimizedGeminiEmbeddings
 from PDFprocessing import PDFProcess
-
 from LocalEmbedds import LocalEmbeddings
+import os
+import shutil
+from pathlib import Path
+from typing import Optional
+
+def find_tesseract() -> Optional[str]:
+    """Auto-detect Tesseract installation"""
+    # Try environment variable first
+    if tesseract_path := os.getenv("TESSERACT_PATH"):
+        return tesseract_path
+    
+    # Try common Windows locations
+    common_paths = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+    ]
+    
+    for path in common_paths:
+        if Path(path).exists():
+            return path
+    
+    # Try system PATH
+    if tesseract_cmd := shutil.which("tesseract"):
+        return tesseract_cmd
+    
+    return None
+
+def find_poppler() -> Optional[str]:
+    """Auto-detect Poppler installation"""
+    # Try environment variable first
+    if poppler_path := os.getenv("POPPLER_PATH"):
+        return poppler_path
+    
+    # Try common Windows locations
+    common_paths = [
+        r'C:\ProgramData\chocolatey\lib\poppler\Library\bin',
+        r'C:\Program Files\poppler\Library\bin',
+    ]
+    
+    for base_path in [r'C:\ProgramData\chocolatey\lib']:
+        if Path(base_path).exists():
+            # Find any poppler version
+            for folder in Path(base_path).iterdir():
+                if folder.name.startswith('poppler'):
+                    bin_path = folder / 'Library' / 'bin'
+                    if bin_path.exists():
+                        return str(bin_path)
+    
+    return None
+
 
 # ----------------------
 # 0️⃣ Configuration
 # ----------------------
 
+#Will be using comments like this to separate each part of the logic
 
-CACHE_FILE = "answers_cache.json"
-PDF_PATH = "ENHANCING ENVIRONMENTAL SUSTAINABILITY IN ASIAN TEXTILE .pdf"
-TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-POPPLER_PATH = r'C:\ProgramData\chocolatey\lib\poppler-25.12.0\Library\bin'
-API_KEY = "AIzaSyD3b3sUEL89Z2SyMQxs0ONaP16WAk1BeMI"
+# Cache and PDF paths - use environment variables with fallbacks
+CACHE_FILE = os.getenv("CACHE_FILE", "answers_cache.json")
+PDF_PATH = os.getenv("PDF_PATH", "ENHANCING ENVIRONMENTAL SUSTAINABILITY IN ASIAN TEXTILE .pdf")
+
+# Auto-detect system paths
+TESSERACT_PATH = find_tesseract()
+POPPLER_PATH = find_poppler()
+
+# API Key - should be from environment variable
+API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyD3b3sUEL89Z2SyMQxs0ONaP16WAk1BeMI")
+
+# Validate required paths
+if not TESSERACT_PATH:
+    raise RuntimeError(
+        "Tesseract not found. Install it or set TESSERACT_PATH environment variable.\n"
+        "Download from: https://github.com/UB-Mannheim/tesseract/wiki"
+    )
+
+if not POPPLER_PATH:
+    raise RuntimeError(
+        "Poppler not found. Install it or set POPPLER_PATH environment variable.\n"
+        "Install via: choco install poppler"
+    )
 
 # Optimization settings
 BATCH_SIZE = 100 # Gemini supports batching up to 100 texts
@@ -43,8 +100,7 @@ os.environ["GOOGLE_API_KEY"] = API_KEY
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 
-
-
+#This is the de depuplication logic that removes similar chunks after the first stage retrieval
 
 # ----------------------
 # 4️⃣ Semantic Deduplication
@@ -54,6 +110,8 @@ def deduplicate_chunks(chunks: List[str], embeddings: np.ndarray, threshold: flo
     Remove near-duplicate chunks to reduce API calls
     Returns deduplicated chunks, embeddings, and kept indices
     """
+
+    # If only one chunk, nothing to remove
     if len(chunks) <= 1:
         return chunks, embeddings, list(range(len(chunks)))
     
@@ -63,12 +121,9 @@ def deduplicate_chunks(chunks: List[str], embeddings: np.ndarray, threshold: flo
     kept_chunks = [chunks[0]]
     kept_embeddings = [embeddings[0]]
     
+    # Calculate similarity with all kept chunks, specifically in this line 
     for i in range(1, len(chunks)):
-        # Calculate similarity with all kept chunks
-        similarities = cosine_similarity(
-            embeddings[i].reshape(1, -1),
-            np.array(kept_embeddings)
-        )[0]
+        similarities = cosine_similarity(embeddings[i].reshape(1, -1),np.array(kept_embeddings))[0]
         
         # If not too similar to any kept chunk, keep it
         if max(similarities) < threshold:
@@ -76,9 +131,11 @@ def deduplicate_chunks(chunks: List[str], embeddings: np.ndarray, threshold: flo
             kept_chunks.append(chunks[i])
             kept_embeddings.append(embeddings[i])
     
+    #Just to show the user, otherwise unecessary
     removed = len(chunks) - len(kept_chunks)
     print(f"✅ Removed {removed} duplicate chunks, kept {len(kept_chunks)}")
     
+    #Finally returns the kept chunks 
     return kept_chunks, np.array(kept_embeddings), kept_indices
 
 # ----------------------
@@ -92,6 +149,7 @@ class GeminiLLM:
         self.last_call_time = None
         self.call_count = 0  # ✅ FIXED: Restored this to prevent AttributeError
         
+    #can be useful in logging
     def generate(self, prompt: str) -> str:
         # 1. ESTIMATE TOKENS
         est_tokens = len(prompt) / 4
@@ -103,6 +161,7 @@ class GeminiLLM:
             if time_since_last < 5:
                 time.sleep(5 - time_since_last)
 
+        # Attempting logic, very crucial for rate limits
         for attempt in range(self.max_retries):
             try:
                 model = genai.GenerativeModel(self.model_name)
@@ -113,6 +172,7 @@ class GeminiLLM:
                 
                 print(f"🤖 API Attempt {attempt + 1} (Model: {self.model_name})...")
                 
+                #The actual response from Gemini
                 response = model.generate_content(prompt)
                 return response.text
                 
@@ -136,6 +196,8 @@ class GeminiLLM:
 # ----------------------
 # 6️⃣ Cache System
 # ----------------------
+
+#Just the cache loading and saving logic
 def load_cache():
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'r', encoding='utf-8') as f:
@@ -153,6 +215,7 @@ def save_cache(cache):
 # ----------------------
 def optimized_two_stage_retrieval(
     query: str,
+    #all of the chunks goes here
     chunks: List[str],
     minilm_embeddings: np.ndarray,
     minilm_embedder: LocalEmbeddings,
@@ -179,21 +242,24 @@ def optimized_two_stage_retrieval(
         minilm_embeddings
     )[0]
     
-    # Apply similarity threshold
+    # Apply similarity threshold, This is where the similar indices are filtered
     threshold_mask = similarities >= SIMILARITY_THRESHOLD
     filtered_indices = np.where(threshold_mask)[0]
     
+    #Tells the amount that were filtered
     if len(filtered_indices) == 0:
         print(f"⚠️  No chunks above threshold {SIMILARITY_THRESHOLD}")
         filtered_indices = np.arange(len(similarities))
     
+    #The varibable holds the similar chunks after filtering
     filtered_similarities = similarities[filtered_indices]
     
-    # Get top K from filtered
+    # Gets the indices of the top K 
     top_k = min(top_k_stage1, len(filtered_indices))
     top_k_relative_indices = np.argsort(filtered_similarities)[-top_k:][::-1]
     top_k_indices = filtered_indices[top_k_relative_indices]
     
+    #gets the similar most chunks' indices and scores
     top_k_chunks = [chunks[i] for i in top_k_indices]
     top_k_scores = [similarities[i] for i in top_k_indices]
     top_k_embeddings = minilm_embeddings[top_k_indices]
@@ -202,7 +268,7 @@ def optimized_two_stage_retrieval(
     print(f"✅ Retrieved {len(top_k_chunks)} top chunks")
     print(f"   Score range: {min(top_k_scores):.4f} to {max(top_k_scores):.4f}")
     
-    # Deduplication
+    # Deduplication, Why is the embeddings passed here again?
     dedup_chunks, dedup_embeddings, kept_indices = deduplicate_chunks(
         top_k_chunks, 
         top_k_embeddings,
@@ -213,10 +279,10 @@ def optimized_two_stage_retrieval(
     print(f"\n🔍 Stage 2: Gemini Re-ranking (top {top_k_stage2})")
     print("="*60)
     
-    # Embed query with Gemini (cached)
+    # Embed query with Gemini (cached), query here means the user question
     query_embedding_gemini = gemini_embedder.embed_query(query)
     
-    # Batch embed chunks with Gemini (cached + batched)
+    # Batch embed chunks with Gemini (cached + batched) and then embed again
     print(f"🔄 Batch embedding {len(dedup_chunks)} chunks with Gemini...")
     chunk_embeddings_gemini = gemini_embedder.embed_texts_batch(dedup_chunks)
     
@@ -255,7 +321,7 @@ def ask_question(
     print(f"📝 Question: {query}")
     print(f"{'='*60}")
     
-    # Check cache
+    # Check cache, failed logic, needs fixing
     if query in cache:
         print("💾 Found cached answer!")
         print(f"\n💡 Answer:\n{cache[query]}")
@@ -343,14 +409,24 @@ def main():
     print("✅ Optimized RAG System Ready!")
     print("="*60)
     
-    # Ask questions
-    questions = [
-        "What can a responsive system do to enhance environmental sustainability in the Asian textile and apparel industry?",
-    ]
-    
-    for i, question in enumerate(questions):
+    # Continuous question loop
+    while True:
+        print("\n💬 Enter your question (type 'quit' or 'exit' to stop)")
+        print("="*60)
+        
+        user_question = input("\n❓ Your question: ").strip()
+        
+        if user_question.lower() in ['quit', 'exit', 'q', '']:
+            print("\n👋 Exiting RAG system. Goodbye!")
+            break
+        
+        if not user_question:
+            print("⚠️  Please enter a valid question")
+            continue
+        
+        # Ask the question
         answer = ask_question(
-            query=question,
+            query=user_question,
             chunks=chunks,
             minilm_embeddings=minilm_embeddings,
             minilm_embedder=minilm_embedder,
@@ -359,11 +435,8 @@ def main():
             cache=cache
         )
         
-        # Wait between questions
-        if answer and i < len(questions) - 1:
-            wait_time = 10
-            print(f"\n⏳ Waiting {wait_time}s before next question...")
-            time.sleep(wait_time)
+        if not answer:
+            print("⚠️  Failed to get answer. Try again.")
     
     # Final stats
     print("\n" + "="*60)
@@ -373,12 +446,6 @@ def main():
     print(f"   Cached answers: {len(cache)}")
     print(f"   Cached embeddings: {len(gemini_embedder.cache)}")
     print("="*60)
-    print(f"\n💡 Optimization Impact:")
-    print(f"   • Without batching: ~50 API calls per query")
-    print(f"   • With batching: ~1-2 API calls per query (first run)")
-    print(f"   • With caching: 0 embedding calls (subsequent runs)")
-    print("="*60)
-
 
 if __name__ == "__main__":
     main()

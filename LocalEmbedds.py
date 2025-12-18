@@ -47,6 +47,7 @@ class LocalEmbeddings:
     @staticmethod
     def load_chunks_and_embeddings():
         """Load pre-computed chunks and embeddings"""
+        #This logic must be fixed because it just checks for file existence not the name
         if not os.path.exists(CHUNKS_FILE):
             return None, None
         
