@@ -1,5 +1,8 @@
 # Dependencies
 venv/
+__pycache__
+page_images
+unga.py
 
 # Environment variables
 .env
