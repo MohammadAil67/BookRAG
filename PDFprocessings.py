@@ -62,7 +62,6 @@ class PDFProcess:
             return None
         
     @staticmethod
-    @staticmethod
     def process_pdf(pdf_path, poppler_path, start_page=1, end_page=None):
         """
         Process PDF with OCR - automatically detects page count if not specified
@@ -95,7 +94,7 @@ class PDFProcess:
             
             for i, image in enumerate(images):
                 page_num = batch_start + i
-                text = pytesseract.image_to_string(image, lang='ben')  # ← CHANGED THIS
+                text = pytesseract.image_to_string(image, lang='eng')
                 all_text.append(f"--- Page {page_num} ---\n{text}")
                 print(f"  ✓ Page {page_num}: {len(text)} characters")
         
@@ -108,7 +107,7 @@ class PDFProcess:
         full_text = "\n\n".join(all_text)
         
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, 
+            chunk_size=500, 
             chunk_overlap=200
         )
         chunks = text_splitter.split_text(full_text)

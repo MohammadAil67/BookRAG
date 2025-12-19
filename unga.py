@@ -4,12 +4,13 @@ from typing import List, Tuple, Optional
 import google.generativeai as genai
 from sklearn.metrics.pairwise import cosine_similarity
 from GeminiEmebedding import OptimizedGeminiEmbeddings
-from PDFprocessing import PDFProcess
+from PDFprocessings import PDFProcess
 from LocalEmbedds import LocalEmbeddings
 import os
 import shutil
 from pathlib import Path
 from typing import Optional
+from langchain_core.prompts import ChatPromptTemplate
 
 def find_tesseract() -> Optional[str]:
     """Auto-detect Tesseract installation"""
@@ -43,16 +44,33 @@ def find_poppler() -> Optional[str]:
     common_paths = [
         r'C:\ProgramData\chocolatey\lib\poppler\Library\bin',
         r'C:\poppler\Library\bin',
+        r'C:\Program Files\poppler\Library\bin',
+        r'C:\Program Files (x86)\poppler\Library\bin',
     ]
     
-    for base_path in [r'C:']:
-        if Path(base_path).exists():
-            # Find any poppler version
-            for folder in Path(base_path).iterdir():
-                if folder.name.startswith('poppler'):
+    for path in common_paths:
+        if Path(path).exists():
+            return path
+    
+    # Search in common installation directories for versioned folders
+    search_dirs = [
+        Path(r'C:\ProgramData\chocolatey\lib'),
+        Path(r'C:\Program Files'),
+        Path(r'C:\Program Files (x86)'),
+        Path(r'C:'),
+    ]
+    
+    for base_path in search_dirs:
+        if not base_path.exists():
+            continue
+        try:
+            for folder in base_path.iterdir():
+                if folder.is_dir() and 'poppler' in folder.name.lower():
                     bin_path = folder / 'Library' / 'bin'
                     if bin_path.exists():
                         return str(bin_path)
+        except (PermissionError, OSError):
+            continue
     
     return None
 
@@ -345,6 +363,39 @@ def ask_question(
         return None
 
 # ----------------------
+# 🔟.1️⃣ ChatPromptTemplate and Query Answering
+# ----------------------
+prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a helpful AI assistant analyzing an English or Bengali textbook. 
+    Answer the question based on the provided context. 
+    Provide a detailed, comprehensive answer with explanations when appropriate"""),
+    ("user", """Context from the textbook:
+{context}
+
+Question: {query}
+
+Provide a detailed answer based on the context above.""")
+])
+
+def answer_query(user_question: str, retriever, llm):
+    # Retrieve relevant documents
+    docs = retriever.get_relevant_documents(user_question)
+    
+    # Combine retrieved documents into context
+    context = "\n\n".join([doc.page_content for doc in docs])
+    
+    # Format the prompt with context and query
+    formatted_messages = prompt.format_messages(
+        context=context,
+        query=user_question
+    )
+    
+    # Send to LLM
+    response = llm.invoke(formatted_messages)
+    
+    return response.content
+
+# ----------------------
 # 1️⃣1️⃣ Main Execution
 # ----------------------
 def main():
@@ -359,18 +410,29 @@ def main():
     print("   • Fast page detection with pdfinfo")
     print("="*60)
     
+    # Generate filenames based on PDF
+    pdf_name = os.path.splitext(os.path.basename(PDF_PATH))[0]
+    chunks_file = f"{pdf_name}_chunks.json"
+    gemini_cache_file = f"{pdf_name}_gemini_cache.json"
+    
+    print(f"\n📁 Using files:")
+    print(f"   PDF: {PDF_PATH}")
+    print(f"   Chunks: {chunks_file}")
+    print(f"   Gemini cache: {gemini_cache_file}")
+    print("="*60)
+    
     # Load or create chunks with embeddings
-    chunks, minilm_embeddings = LocalEmbeddings.load_chunks_and_embeddings()
+    chunks, minilm_embeddings = LocalEmbeddings.load_chunks_and_embeddings(chunks_file)
     
     if chunks is None:
-        # ✅ CLEAN: process_pdf handles page count automatically using pdfinfo!
+        print(f"\n🔄 Processing new PDF: {PDF_PATH}")
         all_text = PDFProcess.process_pdf(PDF_PATH, POPPLER_PATH)
         chunks = PDFProcess.create_chunks(all_text)
-        chunks, minilm_embeddings = LocalEmbeddings.embed_and_save_chunks(chunks)
+        chunks, minilm_embeddings = LocalEmbeddings.embed_and_save_chunks(chunks, chunks_file)
     
-    # Initialize models
+    # Initialize models with PDF-specific cache
     minilm_embedder = LocalEmbeddings()
-    gemini_embedder = OptimizedGeminiEmbeddings()
+    gemini_embedder = OptimizedGeminiEmbeddings(cache_file=gemini_cache_file)
     llm = GeminiLLM()
     
     print("\n" + "="*60)

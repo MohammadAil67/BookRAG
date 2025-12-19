@@ -7,7 +7,6 @@ from typing import List
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-CHUNKS_FILE = "chunks_with_embeddings.json"
 
 class LocalEmbeddings:
     def __init__(self):
@@ -25,7 +24,7 @@ class LocalEmbeddings:
         return self.model.encode([text])[0]
     
     @staticmethod
-    def embed_and_save_chunks(chunks):
+    def embed_and_save_chunks(chunks, chunks_file):
         """Embed all chunks with MiniLM and save to JSON"""
         print(f"\n🔧 Embedding {len(chunks)} chunks with MiniLM...")
         
@@ -38,21 +37,20 @@ class LocalEmbeddings:
             "embeddings": embeddings.tolist()
         }
         
-        with open(CHUNKS_FILE, 'w', encoding='utf-8') as f:
+        with open(chunks_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False)
         
-        print(f"✅ Saved {len(chunks)} chunks with embeddings to {CHUNKS_FILE}")
+        print(f"✅ Saved {len(chunks)} chunks with embeddings to {chunks_file}")
         return chunks, embeddings
     
     @staticmethod
-    def load_chunks_and_embeddings():
+    def load_chunks_and_embeddings(chunks_file):
         """Load pre-computed chunks and embeddings"""
-        #This logic must be fixed because it just checks for file existence not the name
-        if not os.path.exists(CHUNKS_FILE):
+        if not os.path.exists(chunks_file):
             return None, None
         
-        print(f"\n📦 Loading chunks and embeddings from {CHUNKS_FILE}...")
-        with open(CHUNKS_FILE, 'r', encoding='utf-8') as f:
+        print(f"\n📦 Loading chunks and embeddings from {chunks_file}...")
+        with open(chunks_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
         chunks = data["chunks"]
@@ -60,4 +58,3 @@ class LocalEmbeddings:
         
         print(f"✅ Loaded {len(chunks)} chunks with embeddings")
         return chunks, embeddings
-

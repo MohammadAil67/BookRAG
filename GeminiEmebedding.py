@@ -14,7 +14,7 @@ GEMINI_EMBEDDINGS_CACHE = "gemini_embeddings_cache.json"
 # 3️⃣ Optimized Gemini Embeddings with Caching & Batching
 # ----------------------
 class OptimizedGeminiEmbeddings:
-    def __init__(self, cache_file=GEMINI_EMBEDDINGS_CACHE):
+    def __init__(self, cache_file=GEMINI_EMBEDDINGS_CACHE):  # ✅ Already accepts custom file
         self.model_name = "models/text-embedding-004"
         self.call_count = 0
         self.min_delay = 3.0  # Increased to 3 seconds between calls
