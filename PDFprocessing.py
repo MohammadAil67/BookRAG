@@ -95,7 +95,7 @@ class PDFProcess:
             
             for i, image in enumerate(images):
                 page_num = batch_start + i
-                text = pytesseract.image_to_string(image, lang='ben+eng')  # ← CHANGED THIS
+                text = pytesseract.image_to_string(image, lang='eng')  # ← CHANGED THIS
                 all_text.append(f"--- Page {page_num} ---\n{text}")
                 print(f"  ✓ Page {page_num}: {len(text)} characters")
         
