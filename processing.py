@@ -77,29 +77,32 @@ class AdvancedQueryRefiner:
         query_lower = query.lower()
         words = query_lower.split()
         
-        # Check 1: Contains pronouns
+        # Check 1: Contains pronouns (ADDED 'we', 'us', 'our')
         pronouns = {'he', 'she', 'it', 'they', 'this', 'that', 'these', 'those', 
-                   'his', 'her', 'its', 'their', 'him', 'them'}
+                   'his', 'her', 'its', 'their', 'him', 'them', 'we', 'us', 'our'}
         has_pronouns = any(word in pronouns for word in words)
         
-        # Check 2: Very short/vague
-        is_short = len(words) <= 4
+        # Check 2: Very short/vague (INCREASED to <= 6)
+        is_short = len(words) <= 6
         
-        # Check 3: Command-style (needs context)
+        # Check 3: Command-style (ADDED 'who', 'why')
         vague_commands = ['elaborate', 'explain', 'tell', 'show', 'give', 
-                         'do', 'what', 'how', 'describe', 'more']
+                         'do', 'what', 'how', 'describe', 'more', 'who', 'why']
         is_vague_command = any(query_lower.startswith(cmd) for cmd in vague_commands)
         
         # Check 4: Follow-up indicators
-        followup_words = {'also', 'too', 'additionally', 'furthermore', 'moreover'}
+        followup_words = {'also', 'too', 'additionally', 'furthermore', 'moreover', 'previous', 'earlier'}
         is_followup = any(word in followup_words for word in words)
         
         # Check 5: Incomplete questions
-        is_incomplete = query.endswith('?') and len(words) <= 3
+        is_incomplete = query.endswith('?') and len(words) <= 4
+        
+        # Check 6: "Talking about" patterns (NEW)
+        is_meta_question = "talking about" in query_lower or "referred to" in query_lower
         
         # Refine if ANY condition is true
         return (has_pronouns or is_short or is_vague_command or 
-                is_followup or is_incomplete)
+                is_followup or is_incomplete or is_meta_question)
     
     def _extract_context(self, history: List[Dict]) -> Dict:
         """Extract key entities and topics from history"""
@@ -161,7 +164,9 @@ class AdvancedQueryRefiner:
         if context_info['entities']:
             hints += f"\nMentioned: {', '.join(context_info['entities'][:3])}"
         
-        prompt = f"""You are a query rewriting expert. Your job is to rewrite vague or context-dependent questions into clear, standalone questions.
+        # Inside processing.py -> AdvancedQueryRefiner -> _llm_rewrite
+
+        prompt = f"""You are a query rewriting expert.
 
 Conversation History:
 {hist_str}
@@ -169,21 +174,18 @@ Conversation History:
 
 Current Question: "{query}"
 
-RULES:
-1. Replace ALL pronouns (he, she, it, they, this, that) with specific names/subjects
-2. Add missing context from conversation history
-3. Make the question completely self-contained
-4. Keep it concise (under 20 words)
-5. Preserve the original intent
+CRITICAL RULES:
+1. **New Entities:** If the Current Question contains a Specific Name (e.g., "Zainul Abedin"), USE IT. Do NOT replace it with the name from history.
+2. **Context:** Only add context if the question is vague (e.g., "what did he do?", "explain it").
+3. **Pronouns:** Replace pronouns (he, she, it, they, we) with the specific name or subject they refer to.
+4. **Meta-Questions:** If the user asks "who are we talking about?", rewrite it to clarify the previous subject (e.g., "Who is the subject of the previous discussion?").
 
 EXAMPLES:
-- "when did he die" → "when did Zahir Raihan die"
-- "elaborate please" → "elaborate on Zahir Raihan's role in the Liberation War"
-- "do the exercise" → "show the exercise questions from the Zahir Raihan lesson"
-- "what about it" → "what about Zahir Raihan's film career"
-- "more details" → "provide more details about Zahir Raihan's political activism"
+- History: [Zahir Raihan] | Question: "when did he die" -> "when did Zahir Raihan die"
+- History: [Zahir Raihan] | Question: "Explain Zainul Abedin" -> "Explain Zainul Abedin" (New Name Kept)
+- History: [Comparison]   | Question: "who are we talking about" -> "Who were the subjects of the previous comparison?"
 
-Rewritten Question (respond with ONLY the rewritten question, no explanation):"""
+Rewritten Question (respond with ONLY the refined question text):"""
 
         try:
             response = self.llm.generate(prompt, temperature=0.2)
@@ -227,34 +229,6 @@ Rewritten Question (respond with ONLY the rewritten question, no explanation):""
                 return False
         
         return True
-
-class SelfReflector:
-    def __init__(self, llm: GroqLLM):
-        self.llm = llm
-        
-    def verify(self, answer: str, chunks: List[str]) -> Tuple[bool, str]:
-        context = "\n".join(chunks)
-        prompt = f"""Context:
-{context[:3000]}
-
-Generated Answer:
-{answer}
-
-Task: Verify if the Answer is supported by the Context.
-1. Does the Context contain the facts in the Answer?
-2. Are there hallucinations?
-
-Respond JSON: {{"supported": true/false, "reason": "..."}}"""
-
-        try:
-            res = self.llm.generate(prompt, temperature=0.1)
-            if "true" in res.lower() and "false" not in res.lower():
-                return True, "Supported"
-            if "supported" in res.lower() and "false" in res.lower():
-                return False, "Not supported by text"
-            return True, "Passed"
-        except:
-            return True, "Verification failed"
         
 class MultiQueryGenerator:
     """

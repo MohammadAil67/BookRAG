@@ -1,20 +1,38 @@
+"""
+Enhanced RAG System - Tier 2+ Implementation
+
+IMPROVEMENTS OVER ORIGINAL:
+============================
+1. ✅ Embedding-based topic merging (prevents duplicate topics)
+2. ✅ Entity-weighted topic scoring (better relevance detection)
+3. ✅ Intent-based hard reset (detects topic switches)
+4. ✅ Citation validation (prevents hallucination)
+5. ✅ Dynamic retrieval K (adapts based on confidence)
+6. ✅ Topic embeddings cached (performance boost)
+7. ✅ Enhanced logging and debugging
+"""
+
 import os
 import re
+import json
 import pickle
 import numpy as np
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple, Optional
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+
 from config import Config, SystemUtils, HistoryObject
 from models import GroqLLM, Embedder, Reranker
-from retrieval import HybridRetriever, TopicAwareRetriever, MultiQueryRetriever
-from processing import PromptBuilder, AdvancedQueryRefiner, SelfReflector, MultiQueryGenerator
-from topics import ConversationTopicTracker
+from retrieval import HybridRetriever, MultiQueryRetriever
+from processing import PromptBuilder, AdvancedQueryRefiner, MultiQueryGenerator
 from query_decomposition import QueryDecomposer, SmartContextApplier
+from topics import EnhancedTopicTracker, CitationValidator
+
 
 class RAGSystem:
     def __init__(self, config: Config):
-        print("🚀 Initializing 9.7/10 RAG System (Query Decomposition Enabled)...")
+        print("🚀 Initializing Enhanced Tier 2+ RAG System...")
+        print("   ✨ Features: Semantic topic merging, Citation validation, Dynamic K")
         self.config = config
         self.llm = GroqLLM(config.GROQ_API_KEY)
         
@@ -30,39 +48,34 @@ class RAGSystem:
             self.chunks, self.embeddings, self.embedder, self.reranker, config
         )
         
-        self.topic_retriever = TopicAwareRetriever(
-            base_retriever=base_retriever,
-            embedder=self.embedder,
-            config=self.config
-        )
-        
         self.query_generator = MultiQueryGenerator(self.llm)
-        self.multi_query_retriever = MultiQueryRetriever(
-            base_retriever=self.topic_retriever,
+        self.retriever = MultiQueryRetriever(
+            base_retriever=base_retriever,
             query_generator=self.query_generator,
             reranker=self.reranker,
             config=self.config,
             chunks=self.chunks
         )
-        self.retriever = self.multi_query_retriever
         
         # 4. Query Intelligence
         self.decomposer = QueryDecomposer(self.llm)
         self.refiner = AdvancedQueryRefiner(self.llm)
-        self.verifier = SelfReflector(self.llm)
         
-        # 5. Topic Management
-        self.topic_tracker = ConversationTopicTracker()
+        # 5. ENHANCED: Topic Management with semantic merging
+        self.topic_tracker = EnhancedTopicTracker(self.embedder)
         self.context_applier = SmartContextApplier(self.topic_tracker)
         
-        # 6. State
+        # 6. NEW: Citation Validator
+        self.citation_validator = CitationValidator(self.embedder)
+        
+        # 7. State
         self.chat_history: List[Dict] = []
         self.history = HistoryObject()
         
-        print("✅ System Ready with Query Decomposition")
+        print("✅ Enhanced System Ready")
 
     def _load_data(self):
-        """Loads chunks and embeddings from cache or processes PDF if missing."""
+        """Loads chunks and embeddings from cache or processes PDF."""
         if os.path.exists(self.config.CHUNKS_FILE) and os.path.exists(self.config.EMBEDDINGS_FILE):
             try:
                 with open(self.config.CHUNKS_FILE, 'rb') as f: 
@@ -94,7 +107,6 @@ class RAGSystem:
         
         return chunks, embeddings
 
-    # --- HELPER METHODS ---
     def _extract_entities(self, text: str) -> Set[str]:
         """Extract Named Entities"""
         pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
@@ -105,16 +117,76 @@ class RAGSystem:
             'Liberation', 'Language', 'War'
         }
         return set([e for e in entities if e not in stopwords])
+    
+    def generate_quiz(self, topic: str, difficulty: str, num_questions: int) -> List[Dict]:
+        """
+        Generates a structured quiz in JSON format based on the topic and PDF content.
+        """
+        print(f"🎲 Generating {difficulty} quiz for topic: '{topic}'")
+        
+        # 1. Retrieve relevant content specifically for the quiz
+        # We use a broad retrieval here to get enough context
+        search_query = f"facts concepts details about {topic}"
+        chunk_indices = self.retriever.retrieve(search_query, [])
+        # Take top 5 chunks to ensure enough material for questions
+        context_chunks = [self.chunks[i] for i in chunk_indices[:5]]
+        
+        context_text = "\n\n".join(context_chunks)
+        
+        # 2. Construct the strict JSON prompt
+        prompt = f"""
+        Based strictly on the provided text context, generate {num_questions} multiple-choice questions (MCQs) about "{topic}".
+        Difficulty Level: {difficulty}
+
+        CONTEXT:
+        {context_text}
+
+        OUTPUT FORMAT:
+        You must return a valid JSON array of objects. Do not wrap in markdown code blocks. Do not add introductory text.
+        
+        JSON Structure:
+        [
+            {{
+                "id": 1,
+                "question": "Question text here?",
+                "options": ["Option A", "Option B", "Option C", "Option D"],
+                "correct_answer": "Option A",
+                "explanation": "Brief explanation from text."
+            }}
+        ]
+
+        RULES:
+        1. "correct_answer" must be an exact string match to one of the "options".
+        2. "explanation" must explain WHY the answer is correct based on the text.
+        3. Do not use outside knowledge; strictly use the provided context.
+        """
+
+        # 3. Generate
+        try:
+            response = self.llm.generate(prompt)
+            
+            # 4. Clean and Parse JSON
+            # Remove Markdown code blocks if present (```json ... ```)
+            cleaned_response = re.sub(r'```json\s*|\s*```', '', response).strip()
+            
+            # Attempt to parse
+            quiz_data = json.loads(cleaned_response)
+            return quiz_data
+            
+        except json.JSONDecodeError:
+            print("⚠️ Failed to parse Quiz JSON. Returning empty list.")
+            print(f"Raw output: {response}")
+            return []
+        except Exception as e:
+            print(f"⚠️ Quiz generation error: {e}")
+            return []
 
     # --- MAIN PIPELINE ---
     def ask(self, query: str) -> str:
         """
-        Main query pipeline with intelligent routing:
-        - Complex queries → Decomposition
-        - Follow-ups with pronouns → Context injection
-        - Direct queries → Standard retrieval
+        Main query pipeline with intelligent routing.
+        Uses enhanced topic tracking and citation validation.
         """
-        
         print(f"\n🔍 Processing: '{query}'")
         
         # Route based on query complexity
@@ -128,9 +200,10 @@ class RAGSystem:
             return self._ask_simple(query)
     
     def _ask_simple(self, query: str) -> str:
-        """Standard pipeline for simple queries"""
-        
-        # 1. Apply smart context if needed
+        """
+        ENHANCED: Standard pipeline with citation validation and dynamic K.
+        """
+        # 1. Apply smart context
         topic_context = self.context_applier.get_smart_context(query)
         
         if topic_context:
@@ -155,25 +228,28 @@ class RAGSystem:
         prompt = PromptBuilder.build(refined_query, retrieved_chunks, self.chat_history)
         answer = self.llm.generate(prompt)
         
-        # 5. Verify with self-reflection
-        is_valid, reason = self.verifier.verify(answer, retrieved_chunks)
+        # 5. Validate using Embeddings (Fast)
+        is_grounded, supporting_chunks, confidence = \
+            self.citation_validator.validate_answer(answer, retrieved_chunks)
         
-        if not is_valid:
-            print(f"  ⚠️ Answer rejected by Verifier: {reason}")
-            print(f"  🔄 Regenerating with stricter constraints...")
-            
-            prompt += "\n\nCRITICAL: The previous answer was rejected. Answer ONLY using the context provided above. Do not add information from outside the context."
-            answer = self.llm.generate(prompt)
+        print(f"  📊 Grounding Score: {confidence:.2%}")
         
-        # 6. Update state
+        # If validation fails, try ONE regeneration with stricter instructions
+        if not is_grounded:
+            print(f"  ⚠️ Low grounding detected. Regenerating...")
+            strict_prompt = prompt + "\n\nCRITICAL INSTRUCTION: The previous answer was rejected because it included information not found in the text. You must cite specific details from the context provided above."
+            answer = self.llm.generate(strict_prompt)
+        
+        # 6. Update state (Happens for both good and bad answers)
         self._update_history(query, answer)
         self.topic_tracker.update(query, answer)
         
         return answer
     
     def _ask_with_decomposition(self, query: str) -> str:
-        """Handle complex queries with decomposition"""
-        
+        """
+        ENHANCED: Handle complex queries with citation validation.
+        """
         # 1. Decompose query
         decomp_result = self.decomposer.decompose(query)
         sub_queries = decomp_result.sub_queries
@@ -184,30 +260,21 @@ class RAGSystem:
         
         # 2. Retrieve chunks for each sub-query
         all_chunk_indices = set()
-        sub_query_chunks = {}
-        
         for i, sub_q in enumerate(sub_queries, 1):
             print(f"  🔎 Retrieving for sub-query {i}/{len(sub_queries)}...")
-            
-            # Retrieve for this sub-query
             chunk_indices = self.retriever.retrieve(sub_q, self.chat_history)
             all_chunk_indices.update(chunk_indices)
-            sub_query_chunks[sub_q] = chunk_indices
-            
-            print(f"     → Found {len(chunk_indices)} chunks")
         
         # 3. Get all unique chunks
         unique_chunks = [self.chunks[i] for i in all_chunk_indices]
-        
         print(f"  📦 Total unique chunks: {len(unique_chunks)}")
         
         if not unique_chunks:
-            return "I couldn't find any relevant information in the document to answer this question."
+            return "I couldn't find any relevant information in the document."
         
-        # 4. Rerank combined chunks for the original query
+        # 4. Rerank combined chunks
         if len(unique_chunks) > self.config.FINAL_TOP_K:
-            print(f"  🎯 Reranking {len(unique_chunks)} chunks to top {self.config.FINAL_TOP_K}...")
-            
+            print(f"  🎯 Reranking {len(unique_chunks)} chunks...")
             reranked = self.reranker.rerank(query, unique_chunks, self.config.FINAL_TOP_K)
             final_chunks = [unique_chunks[idx] for idx, score in reranked]
         else:
@@ -223,14 +290,15 @@ class RAGSystem:
         
         answer = self.llm.generate(prompt)
         
-        # 6. Verify
-        is_valid, reason = self.verifier.verify(answer, final_chunks)
+        # 6. Validate (Citation Validator)
+        is_grounded, supporting_chunks, cite_confidence = \
+            self.citation_validator.validate_answer(answer, final_chunks)
         
-        if not is_valid:
-            print(f"  ⚠️ Answer rejected: {reason}")
-            print(f"  🔄 Regenerating...")
-            
-            prompt += "\n\nCRITICAL: Answer ONLY using the provided context. Be specific and cite details."
+        print(f"  ✅ Citation confidence: {cite_confidence:.2%}")
+        
+        if not is_grounded:
+            print(f"  ⚠️ Low grounding. Regenerating...")
+            prompt += "\n\nCRITICAL: Answer ONLY using provided context. Cite specific details."
             answer = self.llm.generate(prompt)
         
         # 7. Update state
@@ -245,13 +313,11 @@ class RAGSystem:
                                   decomp_type: str) -> str:
         """Build specialized prompt for decomposed queries"""
         
-        # Format context
         context_text = "\n\n".join([
             f"[Context {i+1}]\n{chunk}" 
             for i, chunk in enumerate(chunks)
         ])
         
-        # Format conversation history
         history_text = ""
         if self.chat_history:
             recent = self.chat_history[-3:]
@@ -260,7 +326,6 @@ class RAGSystem:
                 for h in recent
             ])
         
-        # Build specialized instructions based on decomposition type
         if decomp_type == 'comparison':
             special_instructions = """
 For comparison questions:
@@ -268,7 +333,7 @@ For comparison questions:
 2. Highlight key similarities
 3. Highlight key differences
 4. Provide specific examples from the context
-5. Organize your answer logically (e.g., similarities first, then differences)"""
+5. Organize your answer logically"""
         
         elif decomp_type == 'analytical':
             special_instructions = """
@@ -281,17 +346,16 @@ For analytical questions:
         
         else:
             special_instructions = """
-1. Address all aspects of the question comprehensively
+1. Address all aspects comprehensively
 2. Organize information logically
 3. Use specific details from the context
 4. Ensure all sub-questions are answered"""
         
-        # Build full prompt
-        prompt = f"""You are answering a complex question that has been broken down into sub-questions for better analysis.
+        prompt = f"""You are answering a complex question broken down for analysis.
 
 Original Question: {original_query}
 
-The question was broken into these sub-questions:
+Sub-questions:
 {chr(10).join(f"{i+1}. {sq}" for i, sq in enumerate(sub_queries))}
 
 Context from the document:
@@ -305,10 +369,10 @@ Instructions:
 
 CRITICAL RULES:
 - Use ONLY information from the provided context
-- Do not make up or infer information not present in the context
-- If the context doesn't contain information to fully answer the question, acknowledge this
+- Do not make up or infer information not in context
+- If context lacks information, acknowledge this
 - Be specific and cite relevant details
-- Maintain a clear, organized structure
+- Maintain clear, organized structure
 
 Answer:"""
         
@@ -319,32 +383,36 @@ Answer:"""
         self.chat_history.append({"user": question, "ai": answer})
         self.history.history.append({"question": question, "answer": answer})
         
-        # Keep history manageable
         if len(self.chat_history) > self.config.MAX_CONVERSATION_HISTORY:
             self.chat_history = self.chat_history[-self.config.MAX_CONVERSATION_HISTORY:]
 
     def clear_history(self):
-        """Clear conversation history and reset topic tracker"""
+        """Clear conversation history and reset enhanced topic tracker"""
         self.chat_history = []
         self.history.history = []
-        self.topic_tracker = ConversationTopicTracker()
+        self.topic_tracker = EnhancedTopicTracker(self.embedder)
         self.context_applier = SmartContextApplier(self.topic_tracker)
         print("🗑️ History cleared")
 
     def get_topic_status(self) -> Dict:
-        """Get current topic information for debugging/UI"""
+        """ENHANCED: Get topic information with entity tracking"""
         status = self.topic_tracker.get_topic_hints()
         status['context_would_apply'] = self.context_applier.should_apply_context(
-            "What about it?"  # Test with vague query
+            "What about it?"
         )
         return status
     
     def get_system_stats(self) -> Dict:
-        """Get system statistics"""
+        """ENHANCED: More comprehensive statistics"""
+        current_topic = self.topic_tracker.get_current_topic()
+        
         return {
             'total_chunks': len(self.chunks),
             'conversation_turns': len(self.chat_history),
             'topics_discussed': len(self.topic_tracker.get_all_topics()),
-            'current_topic': self.topic_tracker.get_current_topic().name 
-                           if self.topic_tracker.get_current_topic() else None,
+            'current_topic': current_topic.name if current_topic else None,
+            'current_topic_confidence': current_topic.confidence if current_topic else 0.0,
+            'entity_mentions': dict(current_topic.entity_mentions) if current_topic else {},
+            'last_intent': self.topic_tracker.last_intent,
+            'total_entities_tracked': len(self.topic_tracker.entity_history)
         }

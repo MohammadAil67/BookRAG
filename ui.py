@@ -29,6 +29,16 @@ def initialize_rag(pdf_path=None):
     except Exception as e:
         import traceback
         return None, f"{str(e)}\n{traceback.format_exc()}"
+    
+def init_practice_state():
+    if 'quiz_state' not in st.session_state:
+        st.session_state.quiz_state = {
+            'active': False,
+            'data': [],
+            'user_answers': {},
+            'submitted': False,
+            'score': 0
+        }
 
 # Initialize Session State
 if 'messages' not in st.session_state:
@@ -294,134 +304,149 @@ def render_chat_view():
 # ==========================================
 
 def render_practice_view():
-    st.header("📝 Practice & Tests")
+    init_practice_state()
+    st.header("📝 Interactive Practice Mode")
     
     if not st.session_state.rag_system:
         st.warning("⚠️ Please load a PDF first to generate practice questions.")
         return
     
-    # Topic Selection
-    st.subheader("📚 Choose Topic")
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        # Get current topic from tracker
-        topic_info = st.session_state.rag_system.get_topic_status()
-        current_topic = topic_info.get('current_topic', '')
-        
-        topic = st.text_input(
-            "Enter topic or leave blank for current conversation topic",
-            value=current_topic,
-            placeholder="e.g., Zahir Raihan, Newton's Laws, etc."
-        )
-    
-    with col2:
-        difficulty = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"])
-        num_questions = st.selectbox("Questions", [5, 10, 15, 20])
-    
-    # Generate Quiz Button
-    if st.button("🎲 Generate Quiz", type="primary"):
-        with st.spinner("🧠 Generating questions..."):
-            # Use RAG system to generate questions
-            prompt = f"""Based on the content about {topic if topic else 'the current topic'}, generate {num_questions} {difficulty.lower()} multiple-choice questions.
+    rag = st.session_state.rag_system
 
-Format each question as:
-Q1. [Question text]
-A) [Option A]
-B) [Option B]
-C) [Option C]
-D) [Option D]
-Correct Answer: [A/B/C/D]
-Explanation: [Brief explanation]
-
-Make questions specific to the PDF content, not general knowledge."""
-
-            quiz_text = st.session_state.rag_system.ask(prompt)
-            
-            # Store quiz in session
-            st.session_state.current_quiz = {
-                'topic': topic or current_topic,
-                'difficulty': difficulty,
-                'questions': quiz_text,
-                'timestamp': datetime.now(),
-                'answers': {}
-            }
-            
-            st.rerun()
-    
-    # Display Quiz
-    if 'current_quiz' in st.session_state and st.session_state.current_quiz:
-        quiz = st.session_state.current_quiz
+    # --- SECTION 1: QUIZ SETUP ---
+    # Only show setup if quiz is not active (or if user wants to reset)
+    with st.expander("⚙️ Quiz Configuration", expanded=not st.session_state.quiz_state['active']):
+        col1, col2 = st.columns([2, 1])
         
-        st.divider()
-        st.subheader(f"📋 Quiz: {quiz['topic']}")
-        st.caption(f"Difficulty: {quiz['difficulty']} | Generated: {quiz['timestamp'].strftime('%I:%M %p')}")
-        
-        # Parse and display questions
-        questions_text = quiz['questions']
-        
-        # Simple display (you can parse better later)
-        st.markdown(questions_text)
-        
-        st.divider()
-        
-        # Answer submission area
-        st.subheader("✍️ Your Answers")
-        st.info("💡 Read questions above, then submit answers here for grading")
-        
-        col1, col2 = st.columns([3, 1])
         with col1:
-            user_answers = st.text_area(
-                "Enter your answers (e.g., 1A, 2C, 3B, 4D, 5A)",
-                placeholder="1A, 2C, 3B...",
-                height=100
-            )
+            # Auto-fill current topic from conversation
+            topic_info = rag.get_topic_status()
+            default_topic = topic_info.get('current_topic', {}).name if topic_info.get('current_topic') else ""
+            
+            topic = st.text_input("Topic to Practice", value=default_topic, placeholder="e.g. Newton's Third Law")
         
         with col2:
-            if st.button("📊 Grade Quiz", type="primary"):
-                with st.spinner("Grading..."):
-                    # Use RAG to grade (it knows the correct answers from generation)
-                    grade_prompt = f"""Here are the quiz questions and correct answers:
-{questions_text}
+            difficulty = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"])
+            num_questions = st.number_input("Number of Questions", min_value=3, max_value=10, value=5)
 
-The student answered: {user_answers}
+        if st.button("🚀 Start Quiz", type="primary"):
+            if not topic:
+                st.error("Please enter a topic.")
+            else:
+                with st.spinner(f"🧠 analyzing PDF and generating {difficulty} questions for '{topic}'..."):
+                    # Call the new method we added to RAGSystem
+                    quiz_data = rag.generate_quiz(topic, difficulty, int(num_questions))
+                    
+                    if quiz_data:
+                        st.session_state.quiz_state = {
+                            'active': True,
+                            'data': quiz_data,
+                            'user_answers': {},
+                            'submitted': False,
+                            'score': 0,
+                            'topic': topic
+                        }
+                        st.rerun()
+                    else:
+                        st.error("Could not generate questions. Please try a slightly different topic name.")
 
-Grade the quiz and provide:
-1. Score (X/Y format)
-2. Which questions were correct/incorrect
-3. Brief explanation for incorrect answers
-4. Encouragement based on performance"""
-
-                    grading_result = st.session_state.rag_system.ask(grade_prompt)
-                    
-                    st.session_state.quiz_result = {
-                        'answers': user_answers,
-                        'grading': grading_result,
-                        'timestamp': datetime.now()
-                    }
-                    
-                    # Save to progress
-                    _save_quiz_result(quiz, user_answers, grading_result)
-                    
-                    st.rerun()
+    # --- SECTION 2: TAKE QUIZ ---
+    if st.session_state.quiz_state['active']:
+        st.divider()
+        st.subheader(f"Topic: {st.session_state.quiz_state.get('topic', 'General')}")
         
-        # Show grading result
-        if 'quiz_result' in st.session_state and st.session_state.quiz_result:
-            st.divider()
-            st.subheader("📊 Results")
-            st.markdown(st.session_state.quiz_result['grading'])
+        # We use a form to group inputs and prevent immediate re-runs
+        with st.form(key='quiz_form'):
+            questions = st.session_state.quiz_state['data']
             
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔄 New Quiz"):
-                    del st.session_state.current_quiz
-                    del st.session_state.quiz_result
-                    st.rerun()
-            with col2:
-                if st.button("📈 View Progress"):
-                    st.session_state.view = 'Progress Tracker'
-                    st.rerun()
+            for i, q in enumerate(questions):
+                st.markdown(f"**Q{i+1}. {q['question']}**")
+                
+                # Check if we have a saved answer, otherwise None
+                existing_answer = st.session_state.quiz_state['user_answers'].get(i, None)
+                
+                # Render Radio Button
+                user_choice = st.radio(
+                    "Choose Answer:", 
+                    q['options'], 
+                    key=f"q_{i}", 
+                    index=None if existing_answer is None else q['options'].index(existing_answer),
+                    label_visibility="collapsed"
+                )
+                st.write("") # Spacer
 
+            # Submit / Update Button
+            submit_label = "✅ Submit Quiz" if not st.session_state.quiz_state['submitted'] else "🔄 Update Answers"
+            submitted = st.form_submit_button(submit_label)
+            
+            if submitted:
+                st.session_state.quiz_state['submitted'] = True
+                # Save answers from the widget state
+                for i in range(len(questions)):
+                    val = st.session_state.get(f"q_{i}")
+                    st.session_state.quiz_state['user_answers'][i] = val
+                st.rerun()
+
+    # --- SECTION 3: RESULTS & EXPLANATIONS ---
+    if st.session_state.quiz_state['submitted']:
+        st.divider()
+        st.header("📊 Results")
+        
+        questions = st.session_state.quiz_state['data']
+        answers = st.session_state.quiz_state['user_answers']
+        score = 0
+        
+        for i, q in enumerate(questions):
+            user_ans = answers.get(i)
+            correct_ans = q['correct_answer']
+            is_correct = (user_ans == correct_ans)
+            
+            if is_correct: 
+                score += 1
+                color = "green"
+                icon = "✅"
+            else:
+                color = "red"
+                icon = "❌"
+
+            # Create a card-like look for results
+            with st.container():
+                col_a, col_b = st.columns([0.05, 0.95])
+                with col_a:
+                    st.write(icon)
+                with col_b:
+                    st.markdown(f"**Q{i+1}:** {q['question']}")
+                    
+                    if is_correct:
+                        st.success(f"**Your Answer:** {user_ans}")
+                    else:
+                        st.error(f"**Your Answer:** {user_ans}")
+                        st.info(f"**Correct Answer:** {correct_ans}")
+                    
+                    # DROPDOWN EXPLANATION
+                    with st.expander(f"📖 Explanation for Q{i+1}"):
+                        st.write(q['explanation'])
+            st.divider()
+
+        # Score Summary
+        percentage = (score / len(questions)) * 100
+        st.metric("Final Score", f"{score}/{len(questions)}", f"{percentage:.1f}%")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if percentage >= 80:
+                st.balloons()
+                st.success("🌟 Great job! You know this topic well.")
+            elif percentage >= 50:
+                st.warning("👍 Good effort. Review the explanations above.")
+            else:
+                st.error("💪 Keep studying. Try the 'Study Plan' tab for help.")
+        
+        with col2:
+            if st.button("🔄 Start New Quiz"):
+                st.session_state.quiz_state['active'] = False
+                st.rerun()
+                
 # ==========================================
 # 2. STUDY PLAN VIEW (2-3 hours)
 # ==========================================
