@@ -2,7 +2,8 @@ import streamlit as st
 import time
 import pandas as pd
 from datetime import datetime, timedelta
-from rag import RAGSystem, Config
+from rag_system import RAGSystem  # Changed from rag import
+from config import Config  # Changed from rag import
 import sys
 from io import StringIO
 import os
@@ -84,20 +85,21 @@ def render_sidebar():
                 st.success("✅ RAG System Active")
                 if st.session_state.selected_pdf:
                     st.info(f"📄 **Active PDF:**\n{st.session_state.selected_pdf['name']}")
-                    # Accessing the aliased cache dictionary
-                    cache_size = len(st.session_state.rag_system.cache.cache)
                     st.metric("Chunks Loaded", len(st.session_state.rag_system.chunks))
-                    st.metric("Cached Answers", cache_size)
                 
-                if st.button("🔄 Reload System"):
-                    st.cache_resource.clear()
-                    st.session_state.rag_system = None
-                    st.rerun()
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🔄 Reload System"):
+                        st.cache_resource.clear()
+                        st.session_state.rag_system = None
+                        st.rerun()
                 
-                if st.button("🗑️ Clear History"):
-                    st.session_state.rag_system.clear_history()
-                    st.session_state.messages = [] # Clear UI chat too
-                    st.success("History cleared!")
+                with col2:
+                    if st.button("🗑️ Clear History"):
+                        st.session_state.rag_system.clear_history()
+                        st.session_state.messages = [] # Clear UI chat too
+                        st.success("History cleared!")
+                    
             else:
                 st.warning("⚠️ RAG System Not Loaded")
                 if st.session_state.rag_error:
@@ -212,7 +214,7 @@ def render_chat_view():
         current_path = st.session_state.selected_pdf.get('path') if st.session_state.selected_pdf else None
         
         if current_path != selected_pdf_path:
-            with st.spinner(f"🔄 Loading {pdf_name}..."):
+            with st.spinner(f"📄 Loading {pdf_name}..."):
                 rag, error = initialize_rag(selected_pdf_path)
                 st.session_state.rag_system = rag
                 st.session_state.rag_error = error
@@ -264,13 +266,19 @@ def render_chat_view():
                     
                     response_text = st.session_state.rag_system.ask(prompt)
                     
+                    # Get the captured debug output
+                    debug_output = captured_output.getvalue()
                     sys.stdout = old_stdout
+                    
                     st.write(response_text)
                     
                 except Exception as e:
                     sys.stdout = old_stdout
+                    import traceback
                     response_text = f"❌ Error: {str(e)}"
                     st.error(response_text)
+                    with st.expander("Error Details"):
+                        st.code(traceback.format_exc())
                 
         st.session_state.messages.append({
             "id": str(time.time() + 1),
@@ -285,8 +293,20 @@ def render_chat_view():
 
 def render_practice_view():
     st.header("📝 Practice Exercises")
+    
+    if not st.session_state.rag_system:
+        st.warning("⚠️ Please load a PDF first to generate practice exercises.")
+        return
+    
     st.info("Practice exercises will be generated based on the loaded PDF content in future updates.")
-    # ... (Keep your existing mock data code here if desired) ...
+    
+    # You can add exercise generation here in the future
+    # For now, showing topic info
+    topic_info = st.session_state.rag_system.get_topic_status()
+    if topic_info.get('current_topic'):
+        st.write(f"**Current Topic:** {topic_info['current_topic']}")
+        if topic_info.get('current_keywords'):
+            st.write(f"**Keywords:** {', '.join(topic_info['current_keywords'][:5])}")
 
 # ==========================================
 # 5. VIEW: SYSTEM LOGS
@@ -302,31 +322,74 @@ def render_logs_view():
     rag = st.session_state.rag_system
     
     # System Stats
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Chunks", len(rag.chunks))
-    # Correctly accessing the cache via alias
-    col2.metric("Cached Answers", len(rag.cache.cache)) 
+    col2.metric("Cached Answers", len(rag.cache.cache))
     col3.metric("History Length", len(rag.chat_history))
+    
+    # Topic tracking stats
+    topic_info = rag.get_topic_status()
+    col4.metric("Topics Discussed", len(topic_info.get('all_topics', [])))
     
     st.divider()
     
+    # Topic Tracking Info
+    with st.expander("🎯 Topic Tracking", expanded=True):
+        if topic_info.get('current_topic'):
+            st.success(f"**Current Topic:** {topic_info['current_topic']}")
+            st.write(f"**Confidence:** {topic_info.get('confidence', 0):.2f}")
+            if topic_info.get('current_keywords'):
+                st.write(f"**Keywords:** {', '.join(topic_info['current_keywords'])}")
+        else:
+            st.info("No active topic yet")
+        
+        if topic_info.get('all_topics'):
+            st.write(f"**All Topics:** {', '.join(topic_info['all_topics'])}")
+    
+    # Configuration
+    with st.expander("⚙️ System Configuration"):
+        st.json({
+            "INITIAL_RETRIEVAL_K": rag.config.INITIAL_RETRIEVAL_K,
+            "FINAL_TOP_K": rag.config.FINAL_TOP_K,
+            "RERANK_THRESHOLD": rag.config.RERANK_THRESHOLD,
+            "PDF_PATH": rag.config.PDF_PATH,
+            "MODEL_CACHE_DIR": rag.config.MODEL_CACHE_DIR
+        })
+    
     # Cached Answers
     with st.expander("💾 Answer Cache Content"):
-        # Accessing the specific answer cache dictionary
-        if rag.cache.answer_cache:
-            for key, val in list(rag.cache.answer_cache.items())[:5]:
-                st.text(f"Key: {key[:10]}...")
-                st.code(val[:200] + "...")
+        if rag.cache.cache:
+            st.write(f"Total cached answers: {len(rag.cache.cache)}")
+            for i, (key, val) in enumerate(list(rag.cache.cache.items())[:10]):
+                st.text(f"Key: {key[:16]}...")
+                st.code(val[:200] + "..." if len(val) > 200 else val)
+                if i < 9:
+                    st.divider()
         else:
             st.info("Cache is empty")
 
     # Conversation History
     with st.expander("💬 Conversation History"):
         if rag.history.history:
-            for item in rag.history.history:
+            for i, item in enumerate(rag.history.history):
+                st.write(f"**Turn {i+1}**")
                 st.write(f"**Q:** {item['question']}")
-                st.write(f"**A:** {item['answer']}")
+                st.write(f"**A:** {item['answer'][:300]}..." if len(item['answer']) > 300 else f"**A:** {item['answer']}")
                 st.divider()
+        else:
+            st.info("No conversation history yet")
+    
+    # Retrieval Stats
+    with st.expander("📊 Retrieval System Stats"):
+        st.write("**Retriever Stack:**")
+        st.write("1. MultiQueryRetriever (generates query variants)")
+        st.write("2. TopicAwareRetriever (maintains conversation context)")
+        st.write("3. HybridRetriever (BM25 + Vector Search + Cross-Encoder Reranking)")
+        
+        if hasattr(rag.retriever, 'base_retriever'):
+            topic_retriever = rag.retriever.base_retriever
+            if hasattr(topic_retriever, 'get_topic_summary'):
+                st.write(f"\n**Topic Summary:** {topic_retriever.get_topic_summary()}")
 
 # ==========================================
 # 6. MAIN APP ROUTER
@@ -341,7 +404,12 @@ def main():
         render_practice_view()
     elif selected_view == 'System Logs':
         render_logs_view()
-    # Add other views as needed
+    elif selected_view == 'Study Plan':
+        st.header("📅 Study Plan")
+        st.info("Study plan features coming soon!")
+    elif selected_view == 'Progress Tracker':
+        st.header("📈 Progress Tracker")
+        st.info("Progress tracking features coming soon!")
 
 if __name__ == "__main__":
     main()
