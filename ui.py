@@ -1,6 +1,8 @@
 import streamlit as st
 import time
 import pandas as pd
+import json  # ← Add this if not already there
+import re 
 from datetime import datetime, timedelta
 from rag_system import RAGSystem  # Changed from rag import
 from config import Config  # Changed from rag import
@@ -292,21 +294,474 @@ def render_chat_view():
 # ==========================================
 
 def render_practice_view():
-    st.header("📝 Practice Exercises")
+    st.header("📝 Practice & Tests")
     
     if not st.session_state.rag_system:
-        st.warning("⚠️ Please load a PDF first to generate practice exercises.")
+        st.warning("⚠️ Please load a PDF first to generate practice questions.")
         return
     
-    st.info("Practice exercises will be generated based on the loaded PDF content in future updates.")
+    # Topic Selection
+    st.subheader("📚 Choose Topic")
     
-    # You can add exercise generation here in the future
-    # For now, showing topic info
-    topic_info = st.session_state.rag_system.get_topic_status()
-    if topic_info.get('current_topic'):
-        st.write(f"**Current Topic:** {topic_info['current_topic']}")
-        if topic_info.get('current_keywords'):
-            st.write(f"**Keywords:** {', '.join(topic_info['current_keywords'][:5])}")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        # Get current topic from tracker
+        topic_info = st.session_state.rag_system.get_topic_status()
+        current_topic = topic_info.get('current_topic', '')
+        
+        topic = st.text_input(
+            "Enter topic or leave blank for current conversation topic",
+            value=current_topic,
+            placeholder="e.g., Zahir Raihan, Newton's Laws, etc."
+        )
+    
+    with col2:
+        difficulty = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"])
+        num_questions = st.selectbox("Questions", [5, 10, 15, 20])
+    
+    # Generate Quiz Button
+    if st.button("🎲 Generate Quiz", type="primary"):
+        with st.spinner("🧠 Generating questions..."):
+            # Use RAG system to generate questions
+            prompt = f"""Based on the content about {topic if topic else 'the current topic'}, generate {num_questions} {difficulty.lower()} multiple-choice questions.
+
+Format each question as:
+Q1. [Question text]
+A) [Option A]
+B) [Option B]
+C) [Option C]
+D) [Option D]
+Correct Answer: [A/B/C/D]
+Explanation: [Brief explanation]
+
+Make questions specific to the PDF content, not general knowledge."""
+
+            quiz_text = st.session_state.rag_system.ask(prompt)
+            
+            # Store quiz in session
+            st.session_state.current_quiz = {
+                'topic': topic or current_topic,
+                'difficulty': difficulty,
+                'questions': quiz_text,
+                'timestamp': datetime.now(),
+                'answers': {}
+            }
+            
+            st.rerun()
+    
+    # Display Quiz
+    if 'current_quiz' in st.session_state and st.session_state.current_quiz:
+        quiz = st.session_state.current_quiz
+        
+        st.divider()
+        st.subheader(f"📋 Quiz: {quiz['topic']}")
+        st.caption(f"Difficulty: {quiz['difficulty']} | Generated: {quiz['timestamp'].strftime('%I:%M %p')}")
+        
+        # Parse and display questions
+        questions_text = quiz['questions']
+        
+        # Simple display (you can parse better later)
+        st.markdown(questions_text)
+        
+        st.divider()
+        
+        # Answer submission area
+        st.subheader("✍️ Your Answers")
+        st.info("💡 Read questions above, then submit answers here for grading")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            user_answers = st.text_area(
+                "Enter your answers (e.g., 1A, 2C, 3B, 4D, 5A)",
+                placeholder="1A, 2C, 3B...",
+                height=100
+            )
+        
+        with col2:
+            if st.button("📊 Grade Quiz", type="primary"):
+                with st.spinner("Grading..."):
+                    # Use RAG to grade (it knows the correct answers from generation)
+                    grade_prompt = f"""Here are the quiz questions and correct answers:
+{questions_text}
+
+The student answered: {user_answers}
+
+Grade the quiz and provide:
+1. Score (X/Y format)
+2. Which questions were correct/incorrect
+3. Brief explanation for incorrect answers
+4. Encouragement based on performance"""
+
+                    grading_result = st.session_state.rag_system.ask(grade_prompt)
+                    
+                    st.session_state.quiz_result = {
+                        'answers': user_answers,
+                        'grading': grading_result,
+                        'timestamp': datetime.now()
+                    }
+                    
+                    # Save to progress
+                    _save_quiz_result(quiz, user_answers, grading_result)
+                    
+                    st.rerun()
+        
+        # Show grading result
+        if 'quiz_result' in st.session_state and st.session_state.quiz_result:
+            st.divider()
+            st.subheader("📊 Results")
+            st.markdown(st.session_state.quiz_result['grading'])
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 New Quiz"):
+                    del st.session_state.current_quiz
+                    del st.session_state.quiz_result
+                    st.rerun()
+            with col2:
+                if st.button("📈 View Progress"):
+                    st.session_state.view = 'Progress Tracker'
+                    st.rerun()
+
+# ==========================================
+# 2. STUDY PLAN VIEW (2-3 hours)
+# ==========================================
+
+def render_study_plan_view():
+    st.header("📅 Study Plan Generator")
+    
+    if not st.session_state.rag_system:
+        st.warning("⚠️ Please load a PDF first to generate a study plan.")
+        return
+    
+    # Two modes: Auto-detect or Manual
+    st.subheader("🎯 Study Plan Type")
+    plan_mode = st.radio(
+        "How should we create your plan?",
+        ["🤖 Auto-Detect Weak Areas", "✍️ Manual Topic Selection"],
+        horizontal=True
+    )
+    
+    if plan_mode == "🤖 Auto-Detect Weak Areas":
+        st.info("📊 We'll analyze your conversation history and quiz results to identify weak areas")
+        
+        if st.button("🔍 Analyze & Generate Plan", type="primary"):
+            with st.spinner("🧠 Analyzing your learning patterns..."):
+                # Get conversation history
+                history = st.session_state.rag_system.chat_history
+                
+                # Get quiz results if any
+                quiz_results = _get_quiz_history()
+                
+                # Use RAG to analyze and create plan
+                analysis_prompt = f"""Based on this student's learning activity:
+
+Conversation History (last 10 interactions):
+{json.dumps(history[-10:], indent=2)}
+
+Quiz Results:
+{json.dumps(quiz_results, indent=2)}
+
+1. Identify 3-5 topics the student is weak at or hasn't covered
+2. Create a 7-day study plan with:
+   - Daily topics to cover
+   - Recommended time (minutes)
+   - Specific sections from the PDF to read
+   - Practice exercises
+3. Prioritize weak areas first
+4. Make it realistic and achievable
+
+Format as a clear day-by-day plan."""
+
+                study_plan = st.session_state.rag_system.ask(analysis_prompt)
+                
+                st.session_state.current_study_plan = {
+                    'type': 'auto',
+                    'plan': study_plan,
+                    'created': datetime.now()
+                }
+                
+                st.rerun()
+    
+    else:  # Manual mode
+        st.subheader("✍️ Customize Your Plan")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            topics = st.text_area(
+                "Topics to cover (one per line)",
+                placeholder="Zahir Raihan\nLiberation War\nLanguage Movement",
+                height=150
+            )
+        
+        with col2:
+            duration = st.selectbox("Study Duration", ["3 days", "7 days", "14 days", "30 days"])
+            daily_time = st.slider("Daily study time (minutes)", 15, 120, 45, 15)
+            focus_areas = st.multiselect(
+                "Focus on",
+                ["Understanding Concepts", "Memorization", "Problem Solving", "Exam Prep"]
+            )
+        
+        if st.button("📝 Generate Custom Plan", type="primary"):
+            with st.spinner("Creating your personalized study plan..."):
+                plan_prompt = f"""Create a {duration} study plan for these topics:
+{topics}
+
+Requirements:
+- Daily study time: {daily_time} minutes
+- Focus areas: {', '.join(focus_areas)}
+- Use content from the loaded PDF
+- Include specific reading sections
+- Add practice activities
+- Make it achievable and motivating
+
+Format as a clear day-by-day schedule with checkboxes."""
+
+                study_plan = st.session_state.rag_system.ask(plan_prompt)
+                
+                st.session_state.current_study_plan = {
+                    'type': 'manual',
+                    'topics': topics,
+                    'duration': duration,
+                    'plan': study_plan,
+                    'created': datetime.now()
+                }
+                
+                st.rerun()
+    
+    # Display Study Plan
+    if 'current_study_plan' in st.session_state and st.session_state.current_study_plan:
+        plan = st.session_state.current_study_plan
+        
+        st.divider()
+        st.subheader("📋 Your Study Plan")
+        st.caption(f"Created: {plan['created'].strftime('%B %d, %Y at %I:%M %p')}")
+        
+        # Display the plan
+        st.markdown(plan['plan'])
+        
+        st.divider()
+        
+        # Action buttons
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("💾 Save Plan"):
+                _save_study_plan(plan)
+                st.success("✅ Plan saved to your progress!")
+        
+        with col2:
+            if st.button("📧 Export Plan"):
+                # Create downloadable text file
+                plan_text = f"Study Plan\n{'='*50}\n{plan['plan']}"
+                st.download_button(
+                    "⬇️ Download",
+                    plan_text,
+                    file_name=f"study_plan_{datetime.now().strftime('%Y%m%d')}.txt",
+                    mime="text/plain"
+                )
+        
+        with col3:
+            if st.button("🔄 Generate New Plan"):
+                del st.session_state.current_study_plan
+                st.rerun()
+
+# ==========================================
+# 3. PROGRESS TRACKER VIEW (1-2 hours)
+# ==========================================
+
+def render_progress_tracker_view():
+    st.header("📈 Progress Tracker")
+    
+    if not st.session_state.rag_system:
+        st.warning("⚠️ No data yet. Start learning to track your progress!")
+        return
+    
+    # Initialize progress storage
+    if 'learning_progress' not in st.session_state:
+        st.session_state.learning_progress = {
+            'conversations': [],
+            'quizzes': [],
+            'study_plans': [],
+            'topics_covered': []
+        }
+    
+    # Summary Stats
+    st.subheader("📊 Summary")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_questions = len(st.session_state.rag_system.chat_history)
+        st.metric("Questions Asked", total_questions)
+    
+    with col2:
+        quizzes_taken = len(st.session_state.learning_progress.get('quizzes', []))
+        st.metric("Quizzes Taken", quizzes_taken)
+    
+    with col3:
+        topics_covered = len(st.session_state.rag_system.topic_tracker.get_all_topics())
+        st.metric("Topics Covered", topics_covered)
+    
+    with col4:
+        study_plans = len(st.session_state.learning_progress.get('study_plans', []))
+        st.metric("Study Plans", study_plans)
+    
+    st.divider()
+    
+    # Detailed Views
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "💬 Conversation History",
+        "📝 Quiz Results",
+        "🎯 Topics Covered",
+        "📅 Study Plans"
+    ])
+    
+    with tab1:
+        st.subheader("Recent Conversations")
+        history = st.session_state.rag_system.chat_history
+        
+        if history:
+            for i, turn in enumerate(reversed(history[-20:])):
+                with st.expander(f"Q{len(history)-i}: {turn['user'][:60]}..."):
+                    st.write(f"**Question:** {turn['user']}")
+                    st.write(f"**Answer:** {turn['ai'][:300]}...")
+        else:
+            st.info("No conversations yet. Start chatting!")
+    
+    with tab2:
+        st.subheader("Quiz Performance")
+        quizzes = st.session_state.learning_progress.get('quizzes', [])
+        
+        if quizzes:
+            for i, quiz in enumerate(reversed(quizzes[-10:])):
+                with st.expander(f"Quiz {len(quizzes)-i}: {quiz['topic']} - {quiz['timestamp'].strftime('%b %d')}"):
+                    st.write(f"**Topic:** {quiz['topic']}")
+                    st.write(f"**Difficulty:** {quiz['difficulty']}")
+                    st.write(f"**Score:** {quiz.get('score', 'N/A')}")
+                    st.write(f"**Date:** {quiz['timestamp'].strftime('%B %d, %Y at %I:%M %p')}")
+        else:
+            st.info("No quizzes taken yet. Try the Practice section!")
+    
+    with tab3:
+        st.subheader("Topics You've Explored")
+        topics = st.session_state.rag_system.topic_tracker.get_all_topics()
+        
+        if topics:
+            # Get topic details
+            topic_info = st.session_state.rag_system.get_topic_status()
+            
+            st.write(f"**Currently Studying:** {topic_info.get('current_topic', 'N/A')}")
+            st.write(f"**All Topics Covered:**")
+            
+            for topic in topics:
+                st.markdown(f"- {topic}")
+            
+            # Suggest next topics
+            if st.button("🔮 Suggest Next Topics"):
+                with st.spinner("Analyzing gaps..."):
+                    suggest_prompt = f"""Based on these topics the student has covered:
+{', '.join(topics)}
+
+And the PDF content available, suggest 3-5 related topics they should explore next.
+Make suggestions that build on what they know."""
+
+                    suggestions = st.session_state.rag_system.ask(suggest_prompt)
+                    st.markdown("### 💡 Suggested Next Topics")
+                    st.markdown(suggestions)
+        else:
+            st.info("Start chatting to track topics!")
+    
+    with tab4:
+        st.subheader("Your Study Plans")
+        plans = st.session_state.learning_progress.get('study_plans', [])
+        
+        if plans:
+            for i, plan in enumerate(reversed(plans)):
+                with st.expander(f"Plan {len(plans)-i}: {plan['type'].title()} - {plan['created'].strftime('%b %d')}"):
+                    st.markdown(plan['plan'][:500] + "...")
+                    if st.button(f"View Full Plan {i}", key=f"view_plan_{i}"):
+                        st.markdown(plan['plan'])
+        else:
+            st.info("No study plans yet. Create one in the Study Plan section!")
+    
+    st.divider()
+    
+    # Export Progress
+    st.subheader("📤 Export Progress")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("📊 Generate Progress Report"):
+            with st.spinner("Creating report..."):
+                report_prompt = f"""Create a comprehensive progress report for this student:
+
+Total Questions: {len(st.session_state.rag_system.chat_history)}
+Quizzes Taken: {len(st.session_state.learning_progress.get('quizzes', []))}
+Topics Covered: {', '.join(st.session_state.rag_system.topic_tracker.get_all_topics())}
+
+Include:
+1. Learning summary
+2. Strengths and weaknesses
+3. Recommendations for improvement
+4. Suggested focus areas"""
+
+                report = st.session_state.rag_system.ask(report_prompt)
+                
+                st.markdown("### 📄 Your Progress Report")
+                st.markdown(report)
+    
+    with col2:
+        if st.button("🗑️ Clear All Progress"):
+            if st.checkbox("I'm sure I want to clear all progress"):
+                st.session_state.learning_progress = {
+                    'conversations': [],
+                    'quizzes': [],
+                    'study_plans': [],
+                    'topics_covered': []
+                }
+                st.session_state.rag_system.clear_history()
+                st.success("✅ Progress cleared!")
+                st.rerun()
+
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
+
+def _save_quiz_result(quiz, answers, grading):
+    """Save quiz result to progress"""
+    if 'learning_progress' not in st.session_state:
+        st.session_state.learning_progress = {'quizzes': []}
+    
+    st.session_state.learning_progress.setdefault('quizzes', []).append({
+        'topic': quiz['topic'],
+        'difficulty': quiz['difficulty'],
+        'answers': answers,
+        'grading': grading,
+        'timestamp': datetime.now(),
+        'score': _extract_score(grading)
+    })
+
+def _extract_score(grading_text):
+    """Extract score from grading text (simple regex)"""
+    import re
+    match = re.search(r'(\d+)/(\d+)', grading_text)
+    if match:
+        return f"{match.group(1)}/{match.group(2)}"
+    return "N/A"
+
+def _get_quiz_history():
+    """Get quiz history for analysis"""
+    if 'learning_progress' in st.session_state:
+        return st.session_state.learning_progress.get('quizzes', [])[-5:]
+    return []
+
+def _save_study_plan(plan):
+    """Save study plan to progress"""
+    if 'learning_progress' not in st.session_state:
+        st.session_state.learning_progress = {'study_plans': []}
+    
+    st.session_state.learning_progress.setdefault('study_plans', []).append(plan)
+
+
 
 # ==========================================
 # 5. VIEW: SYSTEM LOGS
@@ -401,15 +856,13 @@ def main():
     if selected_view == 'Chat':
         render_chat_view()
     elif selected_view == 'Practice':
-        render_practice_view()
+        render_practice_view()  # NEW
+    elif selected_view == 'Study Plan':
+        render_study_plan_view()  # NEW
+    elif selected_view == 'Progress Tracker':
+        render_progress_tracker_view()  # NEW
     elif selected_view == 'System Logs':
         render_logs_view()
-    elif selected_view == 'Study Plan':
-        st.header("📅 Study Plan")
-        st.info("Study plan features coming soon!")
-    elif selected_view == 'Progress Tracker':
-        st.header("📈 Progress Tracker")
-        st.info("Progress tracking features coming soon!")
 
 if __name__ == "__main__":
     main()

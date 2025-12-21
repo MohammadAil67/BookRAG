@@ -16,6 +16,10 @@ class ConversationTopicTracker:
     """
     Tier 2 Topic Tracking: Understands what conversation is about
     Helps with context maintenance and query refinement
+    
+    Updates:
+    - Added confidence threshold to prevent stale topic application
+    - Works with SmartContextApplier for intelligent context injection
     """
     
     def __init__(self):
@@ -61,10 +65,16 @@ class ConversationTopicTracker:
         return max(recent_topics, key=lambda t: t.confidence)
     
     def get_topic_context(self) -> str:
-        """Get topic context string for query refinement"""
+        """
+        Get topic context string for query refinement
+        
+        Updated: Now includes confidence threshold
+        """
         
         current = self.get_current_topic()
-        if not current:
+        
+        # Add confidence threshold - only return context if confident
+        if not current or current.confidence < 0.6:
             return ""
         
         # Build context string
@@ -176,5 +186,6 @@ class ConversationTopicTracker:
             'current_keywords': current.keywords if current else [],
             'confidence': current.confidence if current else 0.0,
             'all_topics': self.get_all_topics(),
-            'turn_number': self.turn_number
+            'turn_number': self.turn_number,
+            'total_topics_tracked': len(self.topics)
         }

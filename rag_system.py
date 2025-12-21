@@ -5,16 +5,16 @@ import numpy as np
 from typing import List, Dict, Set
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
-
-from config import Config, SystemUtils, SimpleCache, HistoryObject
+from config import Config, SystemUtils, HistoryObject
 from models import GroqLLM, Embedder, Reranker
 from retrieval import HybridRetriever, TopicAwareRetriever, MultiQueryRetriever
 from processing import PromptBuilder, AdvancedQueryRefiner, SelfReflector, MultiQueryGenerator
 from topics import ConversationTopicTracker
+from query_decomposition import QueryDecomposer, SmartContextApplier
 
 class RAGSystem:
     def __init__(self, config: Config):
-        print("🚀 Initializing 9.6/10 RAG System (Multi-Query Enabled)...")
+        print("🚀 Initializing 9.7/10 RAG System (Query Decomposition Enabled)...")
         self.config = config
         self.llm = GroqLLM(config.GROQ_API_KEY)
         
@@ -25,52 +25,54 @@ class RAGSystem:
         self.embedder = Embedder(config)
         self.reranker = Reranker(config)
         
-        # 3. Init Base Retrieval Stack
+        # 3. Init Retrieval Stack
         base_retriever = HybridRetriever(
             self.chunks, self.embeddings, self.embedder, self.reranker, config
         )
         
-        # Topic Aware Wrapper
         self.topic_retriever = TopicAwareRetriever(
             base_retriever=base_retriever,
             embedder=self.embedder,
             config=self.config
         )
         
-        # --- FIX #4: Multi-Query Integration ---
         self.query_generator = MultiQueryGenerator(self.llm)
-        
-        # The main retriever is now the MultiQueryRetriever, which wraps TopicAware
-        self.retriever = MultiQueryRetriever(
+        self.multi_query_retriever = MultiQueryRetriever(
             base_retriever=self.topic_retriever,
             query_generator=self.query_generator,
             reranker=self.reranker,
             config=self.config,
             chunks=self.chunks
         )
-        # ---------------------------------------
+        self.retriever = self.multi_query_retriever
         
-        # 4. Helpers
+        # 4. Query Intelligence
+        self.decomposer = QueryDecomposer(self.llm)
         self.refiner = AdvancedQueryRefiner(self.llm)
         self.verifier = SelfReflector(self.llm)
+        
+        # 5. Topic Management
         self.topic_tracker = ConversationTopicTracker()
+        self.context_applier = SmartContextApplier(self.topic_tracker)
         
-        # 5. State & Cache
+        # 6. State
         self.chat_history: List[Dict] = []
-        self.history = HistoryObject() 
-        self.cache = SimpleCache(config.CACHE_DIR)
+        self.history = HistoryObject()
         
-        print("✅ System Ready")
+        print("✅ System Ready with Query Decomposition")
 
     def _load_data(self):
         """Loads chunks and embeddings from cache or processes PDF if missing."""
         if os.path.exists(self.config.CHUNKS_FILE) and os.path.exists(self.config.EMBEDDINGS_FILE):
-             try:
-                 with open(self.config.CHUNKS_FILE, 'rb') as f: chunks = pickle.load(f)
-                 with open(self.config.EMBEDDINGS_FILE, 'rb') as f: embeddings = pickle.load(f)
-                 return chunks, embeddings
-             except Exception as e:
-                 print(f"⚠️ Error loading cache: {e}. Re-processing...")
+            try:
+                with open(self.config.CHUNKS_FILE, 'rb') as f: 
+                    chunks = pickle.load(f)
+                with open(self.config.EMBEDDINGS_FILE, 'rb') as f: 
+                    embeddings = pickle.load(f)
+                print(f"📚 Loaded {len(chunks)} chunks from cache")
+                return chunks, embeddings
+            except Exception as e:
+                print(f"⚠️ Error loading cache: {e}. Re-processing...")
 
         try:
             from PDFprocessing import PDFProcess 
@@ -85,8 +87,10 @@ class RAGSystem:
         temp_embedder = SentenceTransformer('BAAI/bge-m3')
         embeddings = temp_embedder.encode(chunks, show_progress_bar=True)
         
-        with open(self.config.CHUNKS_FILE, 'wb') as f: pickle.dump(chunks, f)
-        with open(self.config.EMBEDDINGS_FILE, 'wb') as f: pickle.dump(embeddings, f)
+        with open(self.config.CHUNKS_FILE, 'wb') as f: 
+            pickle.dump(chunks, f)
+        with open(self.config.EMBEDDINGS_FILE, 'wb') as f: 
+            pickle.dump(embeddings, f)
         
         return chunks, embeddings
 
@@ -102,149 +106,245 @@ class RAGSystem:
         }
         return set([e for e in entities if e not in stopwords])
 
-    def _check_topic_coherence(self, chunks: List[str], history: List[Dict]) -> float:
-        """Check if retrieved chunks are about the same topic as recent conversation"""
-        recent_text = " ".join([h['ai'] for h in history[-2:]])
-        if not recent_text: return 1.0
-
-        conversation_entities = self._extract_entities(recent_text)
-        chunks_text = " ".join(chunks)
-        chunk_entities = self._extract_entities(chunks_text)
-
-        if not conversation_entities: return 1.0
-        
-        overlap = len(conversation_entities & chunk_entities)
-        union = len(conversation_entities | chunk_entities)
-        jaccard = overlap / union if union > 0 else 0.0
-
-        conv_embedding = self.embedder.get_embedding(recent_text[:1000])
-        chunks_embedding = self.embedder.get_embedding(chunks_text[:1000])
-        
-        semantic_sim = cosine_similarity(
-            conv_embedding.reshape(1, -1),
-            chunks_embedding.reshape(1, -1)
-        )[0][0]
-
-        return 0.5 * jaccard + 0.5 * semantic_sim
-
-    def _detect_topic_drift(self, new_answer: str, query: str) -> bool:
-        """Detect if new answer has drifted to a completely different topic"""
-        if not self.chat_history:
-            return False
-        
-        current_topic = self.topic_tracker.get_current_topic()
-        if not current_topic:
-            return False
-        
-        new_entities = self._extract_entities(new_answer)
-        topic_keywords = set(current_topic.keywords + [current_topic.name])
-        answer_words = set(re.findall(r'\w+', new_answer.lower()))
-        topic_keywords_lower = {k.lower() for k in topic_keywords}
-        
-        keyword_overlap = len(topic_keywords_lower & answer_words)
-        
-        if new_entities:
-            current_entity = current_topic.name
-            if not any(current_entity.lower() in entity.lower() or 
-                       entity.lower() in current_entity.lower() 
-                       for entity in new_entities):
-                if keyword_overlap == 0:
-                    return True
-        
-        recent_context = " ".join([h['ai'] for h in self.chat_history[-2:]])
-        context_emb = self.embedder.get_embedding(recent_context[:1000])
-        answer_emb = self.embedder.get_embedding(new_answer[:1000])
-        
-        similarity = cosine_similarity(
-            context_emb.reshape(1, -1),
-            answer_emb.reshape(1, -1)
-        )[0][0]
-        
-        if similarity < 0.3:
-            return True
-        
-        return False
-
     # --- MAIN PIPELINE ---
     def ask(self, query: str) -> str:
+        """
+        Main query pipeline with intelligent routing:
+        - Complex queries → Decomposition
+        - Follow-ups with pronouns → Context injection
+        - Direct queries → Standard retrieval
+        """
         
-        # 1. Get Topic Context & Refine Query
-        topic_context = self.topic_tracker.get_topic_context()
+        print(f"\n🔍 Processing: '{query}'")
+        
+        # Route based on query complexity
+        should_decompose, decomp_type = self.decomposer.should_decompose(query)
+        
+        if should_decompose:
+            print(f"  🔀 Complex query detected: {decomp_type}")
+            return self._ask_with_decomposition(query)
+        else:
+            print(f"  📝 Simple query - using standard pipeline")
+            return self._ask_simple(query)
+    
+    def _ask_simple(self, query: str) -> str:
+        """Standard pipeline for simple queries"""
+        
+        # 1. Apply smart context if needed
+        topic_context = self.context_applier.get_smart_context(query)
+        
+        if topic_context:
+            print(f"  📌 Applying context: '{topic_context}'")
+        
+        # 2. Refine query
         refined_query = self.refiner.refine(query, self.chat_history, topic_context)
         
-        # 2. Multi-Query Retrieval (Wraps TopicAware & Hybrid)
-        # Note: We pass chat_history because the wrapped TopicAwareRetriever needs it
+        if refined_query != query:
+            print(f"  🔧 Refined to: '{refined_query}'")
+        
+        # 3. Retrieve chunks
         chunk_indices = self.retriever.retrieve(refined_query, self.chat_history)
         retrieved_chunks = [self.chunks[i] for i in chunk_indices]
         
-        # 2a. Coherence Validation (Fix #2) - Still useful as a final check
-        if self.chat_history and retrieved_chunks:
-            coherence_score = self._check_topic_coherence(retrieved_chunks, self.chat_history)
-            if coherence_score < 0.45:
-                print(f"  ⚠️ Low Topic Coherence ({coherence_score:.2f}). Re-retrieving...")
-                current_topic = self.topic_tracker.get_current_topic()
-                if current_topic:
-                    enhanced_query = f"{refined_query} regarding {current_topic.name}"
-                    print(f"  🔄 Contextual Retry: '{enhanced_query}'")
-                    # Recursive call or retry logic
-                    chunk_indices = self.retriever.retrieve(enhanced_query, self.chat_history)
-                    retrieved_chunks = [self.chunks[i] for i in chunk_indices]
-
+        print(f"  📦 Retrieved {len(retrieved_chunks)} chunks")
+        
         if not retrieved_chunks:
             return "I couldn't find any relevant information in the document."
-
-        # 3. Generate Initial Answer
+        
+        # 4. Generate answer
         prompt = PromptBuilder.build(refined_query, retrieved_chunks, self.chat_history)
         answer = self.llm.generate(prompt)
         
-        # 4. Verify (Self-Reflection)
+        # 5. Verify with self-reflection
         is_valid, reason = self.verifier.verify(answer, retrieved_chunks)
+        
         if not is_valid:
             print(f"  ⚠️ Answer rejected by Verifier: {reason}")
-            prompt += "\n\nCRITICAL: The previous answer was rejected. Answer ONLY using the context."
+            print(f"  🔄 Regenerating with stricter constraints...")
+            
+            prompt += "\n\nCRITICAL: The previous answer was rejected. Answer ONLY using the context provided above. Do not add information from outside the context."
             answer = self.llm.generate(prompt)
-
-        # 5. Detect Topic Drift (Fix #4)
-        if self.chat_history:
-            drift_detected = self._detect_topic_drift(answer, query)
-            if drift_detected:
-                print(f"  🚨 TOPIC DRIFT DETECTED - Rejecting answer")
-                
-                current_topic = self.topic_tracker.get_current_topic()
-                if current_topic:
-                    # Strategy: Force retrieval AND generation to stay on-topic
-                    constrained_query = f"{refined_query} specifically about {current_topic.name}"
-                    
-                    # Re-retrieve with constraint
-                    chunk_indices = self.retriever.retrieve(constrained_query, self.chat_history)
-                    retrieved_chunks = [self.chunks[i] for i in chunk_indices]
-                    
-                    # Re-generate
-                    prompt = PromptBuilder.build(constrained_query, retrieved_chunks, self.chat_history)
-                    answer = self.llm.generate(prompt)
-
-        # 6. Finalize & Update State
-        self._update_history(query, answer)
         
-        # IMPORTANT: Only update topic tracker with the FINAL, validated answer
+        # 6. Update state
+        self._update_history(query, answer)
         self.topic_tracker.update(query, answer)
         
         return answer
+    
+    def _ask_with_decomposition(self, query: str) -> str:
+        """Handle complex queries with decomposition"""
+        
+        # 1. Decompose query
+        decomp_result = self.decomposer.decompose(query)
+        sub_queries = decomp_result.sub_queries
+        
+        print(f"  📋 Decomposed into {len(sub_queries)} sub-queries:")
+        for i, sq in enumerate(sub_queries, 1):
+            print(f"     {i}. {sq}")
+        
+        # 2. Retrieve chunks for each sub-query
+        all_chunk_indices = set()
+        sub_query_chunks = {}
+        
+        for i, sub_q in enumerate(sub_queries, 1):
+            print(f"  🔎 Retrieving for sub-query {i}/{len(sub_queries)}...")
+            
+            # Retrieve for this sub-query
+            chunk_indices = self.retriever.retrieve(sub_q, self.chat_history)
+            all_chunk_indices.update(chunk_indices)
+            sub_query_chunks[sub_q] = chunk_indices
+            
+            print(f"     → Found {len(chunk_indices)} chunks")
+        
+        # 3. Get all unique chunks
+        unique_chunks = [self.chunks[i] for i in all_chunk_indices]
+        
+        print(f"  📦 Total unique chunks: {len(unique_chunks)}")
+        
+        if not unique_chunks:
+            return "I couldn't find any relevant information in the document to answer this question."
+        
+        # 4. Rerank combined chunks for the original query
+        if len(unique_chunks) > self.config.FINAL_TOP_K:
+            print(f"  🎯 Reranking {len(unique_chunks)} chunks to top {self.config.FINAL_TOP_K}...")
+            
+            reranked = self.reranker.rerank(query, unique_chunks, self.config.FINAL_TOP_K)
+            final_chunks = [unique_chunks[idx] for idx, score in reranked]
+        else:
+            final_chunks = unique_chunks
+        
+        # 5. Generate comprehensive answer
+        prompt = self._build_decomposed_prompt(
+            original_query=query,
+            sub_queries=sub_queries,
+            chunks=final_chunks,
+            decomp_type=decomp_result.decomposition_type
+        )
+        
+        answer = self.llm.generate(prompt)
+        
+        # 6. Verify
+        is_valid, reason = self.verifier.verify(answer, final_chunks)
+        
+        if not is_valid:
+            print(f"  ⚠️ Answer rejected: {reason}")
+            print(f"  🔄 Regenerating...")
+            
+            prompt += "\n\nCRITICAL: Answer ONLY using the provided context. Be specific and cite details."
+            answer = self.llm.generate(prompt)
+        
+        # 7. Update state
+        self._update_history(query, answer)
+        self.topic_tracker.update(query, answer)
+        
+        return answer
+    
+    def _build_decomposed_prompt(self, original_query: str, 
+                                  sub_queries: List[str], 
+                                  chunks: List[str],
+                                  decomp_type: str) -> str:
+        """Build specialized prompt for decomposed queries"""
+        
+        # Format context
+        context_text = "\n\n".join([
+            f"[Context {i+1}]\n{chunk}" 
+            for i, chunk in enumerate(chunks)
+        ])
+        
+        # Format conversation history
+        history_text = ""
+        if self.chat_history:
+            recent = self.chat_history[-3:]
+            history_text = "\n".join([
+                f"User: {h['user']}\nAssistant: {h['ai']}" 
+                for h in recent
+            ])
+        
+        # Build specialized instructions based on decomposition type
+        if decomp_type == 'comparison':
+            special_instructions = """
+For comparison questions:
+1. Clearly describe each entity being compared
+2. Highlight key similarities
+3. Highlight key differences
+4. Provide specific examples from the context
+5. Organize your answer logically (e.g., similarities first, then differences)"""
+        
+        elif decomp_type == 'analytical':
+            special_instructions = """
+For analytical questions:
+1. Break down the topic systematically
+2. Address each aspect mentioned in the sub-questions
+3. Provide evidence from the context
+4. Draw connections between different aspects
+5. Conclude with a synthesis"""
+        
+        else:
+            special_instructions = """
+1. Address all aspects of the question comprehensively
+2. Organize information logically
+3. Use specific details from the context
+4. Ensure all sub-questions are answered"""
+        
+        # Build full prompt
+        prompt = f"""You are answering a complex question that has been broken down into sub-questions for better analysis.
 
-    def _update_history(self, question, answer):
+Original Question: {original_query}
+
+The question was broken into these sub-questions:
+{chr(10).join(f"{i+1}. {sq}" for i, sq in enumerate(sub_queries))}
+
+Context from the document:
+{context_text}
+
+Previous conversation:
+{history_text if history_text else "None"}
+
+Instructions:
+{special_instructions}
+
+CRITICAL RULES:
+- Use ONLY information from the provided context
+- Do not make up or infer information not present in the context
+- If the context doesn't contain information to fully answer the question, acknowledge this
+- Be specific and cite relevant details
+- Maintain a clear, organized structure
+
+Answer:"""
+        
+        return prompt
+    
+    def _update_history(self, question: str, answer: str):
+        """Update conversation history"""
         self.chat_history.append({"user": question, "ai": answer})
         self.history.history.append({"question": question, "answer": answer})
+        
+        # Keep history manageable
+        if len(self.chat_history) > self.config.MAX_CONVERSATION_HISTORY:
+            self.chat_history = self.chat_history[-self.config.MAX_CONVERSATION_HISTORY:]
 
     def clear_history(self):
+        """Clear conversation history and reset topic tracker"""
         self.chat_history = []
         self.history.history = []
         self.topic_tracker = ConversationTopicTracker()
-    
-    def clear_cache(self):
-        """Clear the answer cache"""
-        self.cache.cache = {}
-        self.cache.save()
-        print("🗑️ Cache cleared")
+        self.context_applier = SmartContextApplier(self.topic_tracker)
+        print("🗑️ History cleared")
 
     def get_topic_status(self) -> Dict:
-        return self.topic_tracker.get_topic_hints()
+        """Get current topic information for debugging/UI"""
+        status = self.topic_tracker.get_topic_hints()
+        status['context_would_apply'] = self.context_applier.should_apply_context(
+            "What about it?"  # Test with vague query
+        )
+        return status
+    
+    def get_system_stats(self) -> Dict:
+        """Get system statistics"""
+        return {
+            'total_chunks': len(self.chunks),
+            'conversation_turns': len(self.chat_history),
+            'topics_discussed': len(self.topic_tracker.get_all_topics()),
+            'current_topic': self.topic_tracker.get_current_topic().name 
+                           if self.topic_tracker.get_current_topic() else None,
+        }

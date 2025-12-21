@@ -48,36 +48,6 @@ class Config:
         self.TOP_K_CHUNKS = self.FINAL_TOP_K
         self.SIMILARITY_THRESHOLD = 0.0 
         self.MAX_CONVERSATION_HISTORY = 10
-        self.CONTEXT_CACHE_FILE = os.path.join(self.CACHE_DIR, "answer_cache.json")
-
-class SimpleCache:
-    def __init__(self, cache_dir):
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        self.cache_file = os.path.join(cache_dir, "answer_cache.json")
-        self.cache = {} 
-        self.answer_cache = self.cache 
-        self.load()
-    
-    def load(self):
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    self.cache.update(json.load(f))
-            except: pass
-            
-    def save(self):
-        try:
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.cache, f, ensure_ascii=False, indent=2)
-        except: pass
-        
-    def get(self, key):
-        return self.cache.get(key)
-        
-    def set(self, key, value):
-        self.cache[key] = value
-        self.save()
 
 @dataclass
 class HistoryObject:
