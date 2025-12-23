@@ -315,17 +315,13 @@ def render_practice_view():
     
     rag = st.session_state.rag_system
 
-    # --- SECTION 1: QUIZ SETUP ---
-    # Only show setup if quiz is not active (or if user wants to reset)
+# --- SECTION 1: QUIZ SETUP ---
+# Only show setup if quiz is not active (or if user wants to reset)
     with st.expander("⚙️ Quiz Configuration", expanded=not st.session_state.quiz_state['active']):
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            # Auto-fill current topic from conversation
-            topic_info = rag.get_topic_status()
-            default_topic = topic_info.get('current_topic') or ""
-            
-            topic = st.text_input("Topic to Practice", value=default_topic, placeholder="e.g. Newton's Third Law")
+            topic = st.text_input("Topic to Practice", placeholder="e.g. Newton's Third Law")
         
         with col2:
             difficulty = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"])
