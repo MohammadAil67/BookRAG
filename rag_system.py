@@ -211,6 +211,8 @@ class RAGSystem:
         1. "correct_answer" must be an exact string match to one of the "options".
         2. "explanation" must explain WHY the answer is correct based on the text.
         3. Do not use outside knowledge; strictly use the provided context.
+        4. If the topic is mathematical and if there are mathematical data in the context, include at least one math-related question.
+        5. And if it is a mathematical question the answer should not be from the context.
         """
 
         try:
@@ -418,14 +420,6 @@ Answer:"""
         self.context_applier = SmartContextApplier(self.topic_tracker)
         print("🗑️ History cleared")
 
-    def get_topic_status(self) -> Dict:
-        """Get topic information with entity tracking"""
-        status = self.topic_tracker.get_topic_hints()
-        status['context_would_apply'] = self.context_applier.should_apply_context(
-            "What about it?"
-        )
-        return status
-    
     def get_system_stats(self) -> Dict:
         """More comprehensive statistics"""
         current_topic = self.topic_tracker.get_current_topic()

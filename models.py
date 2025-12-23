@@ -7,7 +7,7 @@ from config import Config
 class GroqLLM:
     def __init__(self, api_key: str):
         self.client = Groq(api_key=api_key)
-        self.model_name = "meta-llama/llama-4-maverick-17b-128e-instruct"
+        self.model_name = "llama-3.3-70b-versatile"
     
     def generate(self, prompt: str, temperature: float = 0.5) -> str:
         try:

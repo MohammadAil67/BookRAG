@@ -78,13 +78,15 @@ class EnhancedTopicTracker:
                 'her', 'us', 'them', 'my', 'your', 'his', 'their', 'our'
             },
             'bn': {
-                'ржПржмржВ', 'ржмрж╛', 'ржХрж┐ржирзНрждрзБ', 'рждржмрзЗ', 'ржпржжрж┐', 'рждрж╛рж╣рж▓рзЗ', 'ржХрж╛рж░ржг', 'ржпрзЗржи',
-                'ржПржЗ', 'рж╕рзЗржЗ', 'ржУржЗ', 'ржХрзЛржи', 'ржХрж┐ржЫрзБ', 'рж╕ржм', 'ржЕржирзЗржХ', 'ржХржпрж╝рзЗржХ',
-                'ржЖржорж┐', 'рждрзБржорж┐', 'рж╕рзЗ', 'ржЖржорж░рж╛', 'рждрж╛рж░рж╛', 'рждрзЛржорж╛рж░', 'ржЖржорж╛рж░', 'рждрж╛рж░',
-                'ржПрж░', 'ржпрж╛рж░', 'ржХрж╛рж░', 'ржЖржЫрзЗ', 'ржЫрж┐рж▓', 'рж╣ржпрж╝', 'рж╣ржмрзЗ', 'ржХрж░рж╛', 'ржХрж░рзЗ',
-                'ржерзЗржХрзЗ', 'рж╕рж╛ржерзЗ', 'ржЬржирзНржп', 'ржоржзрзНржпрзЗ', 'ржЙржкрж░', 'ржирж┐ржЪрзЗ', 'ржкрж╛рж╢рзЗ',
-                'ржХрзА', 'ржХрзЗ', 'ржХрзЛржерж╛ржпрж╝', 'ржХржЦржи', 'ржХрзАржнрж╛ржмрзЗ', 'ржХрзЗржи', 'ржпржЦржи', 'ржпрзЗржЦрж╛ржирзЗ',
-                'ржПржХржЯрж┐', 'ржжрзБржЯрж┐', 'рждрж┐ржиржЯрж┐', 'рж╣ржпрж╝рзЗржЫрзЗ', 'рж╣ржЪрзНржЫрзЗ', 'ржЫрж┐рж▓рзЗржи', 'ржЖржЫрзЗржи'
+                'আমি', 'তুমি', 'তোমার', 'আমার', 'তার', 'তাদের', 'এটি', 'ওটি',
+                'এই', 'ওই', 'সে', 'তিনি', 'তারা', 'কি', 'কীভাবে', 'কোথায়',
+                'কখন', 'কেন', 'এবং', 'অথবা', 'কিন্তু', 'যদি', 'তাহলে', 'যেমন',
+                'ছিল', 'ছিলেন', 'আছে', 'আছেন', 'হয়', 'হয়েছে', 'হয়েছিল', 'হবে',
+                'করা', 'করেন', 'করেছেন', 'করবেন', 'থেকে', 'দিয়ে', 'জন্য', 'সঙ্গে',
+                'নিয়ে', 'মধ্যে', 'ভিতর', 'বাইরে', 'উপর', 'নিচে', 'পাশে', 'সামনে',
+                'পেছনে', 'সাথে', 'বিষয়ে', 'সম্পর্কে', 'অনুযায়ী', 'মতো', 'মতে', 'মত',
+                'আর', 'ও', 'বা', 'না', 'নয়', 'যে', 'যা', 'যার', 'যাকে', 'যেন',
+                'সেই', 'তাই', 'এমন', 'ওই', 'এর', 'তার', 'যার'
             }
         }
         
@@ -96,9 +98,9 @@ class EnhancedTopicTracker:
                 r'\b(switch to|shifting to)\b'
             ],
             'bn': [
-                r'\b(ржирждрзБржи ржмрж┐рж╖ржпрж╝|ржнрж┐ржирзНржи ржмрж┐рж╖ржпрж╝|ржмрж┐рж╖ржпрж╝ ржкрж░рж┐ржмрж░рзНрждржи)\b',
-                r'\b(ржПржЦржи ржмрж▓рзБржи|ржПржЦржи ржЬрж╛ржирж╛ржмрзЗржи|ржПржЦржи ржмрж▓рж┐)\b',
-                r'\b(рж╕ржорзНржкрж░рзНржХрзЗ ржмрж▓рзБржи|рж╕ржорзНржкрж░рзНржХрзЗ ржЬрж╛ржирж╛ржи)\b'
+                r'\b(নতুন বিষয়|ভিন্ন বিষয়|বিষয় পরিবর্তন)\b',
+                r'\b(এখন বলুন|এখন আলোচনা|এখন বলি)\b',
+                r'\b(স্থানান্তর করুন|স্থানান্তর করি)\b'
             ]
         }
     
@@ -163,7 +165,7 @@ class EnhancedTopicTracker:
         
         # Merge if similarity is high
         if best_sim > 0.75:
-            print(f"  ЁЯФЧ Merging '{topic_name}' into '{best_match.name}' (sim: {best_sim:.3f})")
+            print(f"  🔗 Merging '{topic_name}' into '{best_match.name}' (sim: {best_sim:.3f})")
             return best_match
         
         return None
@@ -188,6 +190,32 @@ class EnhancedTopicTracker:
     def get_all_topics(self) -> Set[str]:
         """Get all topic names"""
         return {t.name for t in self.topics}
+    
+    def get_topic_hints(self) -> Dict:
+        """
+        Get topic hints for UI and context application
+        Returns dictionary with current topic info
+        """
+        current_topic = self.get_current_topic()
+        
+        if not current_topic:
+            return {
+                'current_topic': None,
+                'confidence': 0.0,
+                'keywords': [],
+                'entities': {},
+                'language': 'en'
+            }
+        
+        return {
+            'current_topic': current_topic.name,
+            'confidence': current_topic.confidence,
+            'keywords': list(current_topic.keywords)[:5],  # Top 5 keywords
+            'entities': dict(current_topic.entity_mentions),
+            'language': current_topic.language,
+            'last_mentioned': current_topic.last_mentioned,
+            'turns_ago': self.turn_number - current_topic.last_mentioned
+        }
     
     def match_topic_to_query(self, query: str) -> Tuple[Optional[Topic], float]:
         """Match query to existing topics using entity overlap"""
@@ -236,7 +264,7 @@ class EnhancedTopicTracker:
         
         for pattern in patterns:
             if re.search(pattern, query_normalized):
-                print(f"  ЁЯФД Hard reset detected")
+                print(f"  🔄 Hard reset detected")
                 return True
         
         return False
@@ -289,7 +317,7 @@ class EnhancedTopicTracker:
                 similar_topic.entity_mentions[entity] = \
                     similar_topic.entity_mentions.get(entity, 0) + 1
             
-            print(f"  ЁЯУМ Reinforced topic: '{similar_topic.name}' (conf: {similar_topic.confidence:.2f})")
+            print(f"  📊 Reinforced topic: '{similar_topic.name}' (conf: {similar_topic.confidence:.2f})")
         
         else:
             # Create new topic
@@ -304,7 +332,7 @@ class EnhancedTopicTracker:
             )
             
             self.topics.append(new_topic)
-            print(f"  тЬи New topic: '{topic_name}' ({lang})")
+            print(f"  ➕ New topic: '{topic_name}' ({lang})")
         
         # Decay old topics
         for topic in self.topics:
