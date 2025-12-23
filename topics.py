@@ -1,65 +1,149 @@
+import re
 import numpy as np
-import re  # Moved to top level for better performance
-from typing import List, Optional, Dict, Tuple, Set
-from dataclasses import dataclass
-from collections import Counter, defaultdict
+from typing import List, Dict, Set, Optional, Tuple
+from dataclasses import dataclass, field
+from collections import Counter
 from sklearn.metrics.pairwise import cosine_similarity
+
+
+# ==========================================
+# Language Detection & Normalization
+# ==========================================
+
+class TextNormalizer:
+    """Language-aware text normalization utilities"""
+    
+    @staticmethod
+    def is_bengali(text: str) -> bool:
+        """Check if text contains Bengali characters"""
+        bengali_chars = sum(1 for c in text if '\u0980' <= c <= '\u09FF')
+        return bengali_chars > len(text) * 0.2
+    
+    @staticmethod
+    def normalize(text: str) -> str:
+        """Normalize text based on detected language"""
+        if TextNormalizer.is_bengali(text):
+            return text  # No case conversion for Bengali
+        return text.lower()  # Lowercase for English
+    
+    @staticmethod
+    def detect_language(text: str) -> str:
+        """Detect text language"""
+        return 'bn' if TextNormalizer.is_bengali(text) else 'en'
+
+
+# ==========================================
+# Topic Data Structure
+# ==========================================
 
 @dataclass
 class Topic:
-    """Enhanced Topic with embeddings"""
+    """Represents a conversation topic with multilingual support"""
     name: str
-    keywords: List[str]
-    confidence: float
-    first_mentioned: int
-    last_mentioned: int
+    keywords: Set[str]
     embedding: Optional[np.ndarray] = None
-    entity_mentions: Counter = None
-    
-    def __post_init__(self):
-        if self.entity_mentions is None:
-            self.entity_mentions = Counter()
+    confidence: float = 1.0
+    last_mentioned: int = 0
+    entity_mentions: Dict[str, int] = field(default_factory=dict)
+    language: str = 'en'  # 'en' or 'bn'
+
+
+# ==========================================
+# Enhanced Topic Tracker
+# ==========================================
 
 class EnhancedTopicTracker:
     """
-    Tier 2+ Topic Tracking with Embedding merging and Intent detection
+    Advanced topic tracking with semantic merging and entity awareness
+    Supports both English and Bengali
     """
     
     def __init__(self, embedder):
+        self.embedder = embedder
         self.topics: List[Topic] = []
         self.turn_number = 0
-        self.entity_history = defaultdict(int)
-        self.embedder = embedder
-        
-        # Intent tracking
         self.last_intent = None
-        self.intent_keywords = {
-            'comparison': ['compare', 'difference', 'versus', 'vs', 'contrast'],
-            'definition': ['what is', 'define', 'meaning', 'explain'],
-            'causal': ['why', 'cause', 'reason', 'because', 'lead to'],
-            'temporal': ['when', 'date', 'time', 'year', 'period'],
-            'listing': ['list', 'types', 'kinds', 'categories', 'examples']
+        self.entity_history: Dict[str, int] = {}
+        self.normalizer = TextNormalizer()
+        
+        # Stopwords for keyword extraction
+        self.stopwords = {
+            'en': {
+                'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but',
+                'in', 'with', 'to', 'for', 'of', 'as', 'by', 'from', 'this', 'that',
+                'it', 'was', 'are', 'be', 'been', 'have', 'has', 'had', 'do', 'does',
+                'did', 'will', 'would', 'should', 'could', 'may', 'might', 'can',
+                'what', 'when', 'where', 'who', 'how', 'why', 'there', 'here',
+                'these', 'those', 'i', 'you', 'he', 'she', 'we', 'they', 'me', 'him',
+                'her', 'us', 'them', 'my', 'your', 'his', 'their', 'our'
+            },
+            'bn': {
+                'ржПржмржВ', 'ржмрж╛', 'ржХрж┐ржирзНрждрзБ', 'рждржмрзЗ', 'ржпржжрж┐', 'рждрж╛рж╣рж▓рзЗ', 'ржХрж╛рж░ржг', 'ржпрзЗржи',
+                'ржПржЗ', 'рж╕рзЗржЗ', 'ржУржЗ', 'ржХрзЛржи', 'ржХрж┐ржЫрзБ', 'рж╕ржм', 'ржЕржирзЗржХ', 'ржХржпрж╝рзЗржХ',
+                'ржЖржорж┐', 'рждрзБржорж┐', 'рж╕рзЗ', 'ржЖржорж░рж╛', 'рждрж╛рж░рж╛', 'рждрзЛржорж╛рж░', 'ржЖржорж╛рж░', 'рждрж╛рж░',
+                'ржПрж░', 'ржпрж╛рж░', 'ржХрж╛рж░', 'ржЖржЫрзЗ', 'ржЫрж┐рж▓', 'рж╣ржпрж╝', 'рж╣ржмрзЗ', 'ржХрж░рж╛', 'ржХрж░рзЗ',
+                'ржерзЗржХрзЗ', 'рж╕рж╛ржерзЗ', 'ржЬржирзНржп', 'ржоржзрзНржпрзЗ', 'ржЙржкрж░', 'ржирж┐ржЪрзЗ', 'ржкрж╛рж╢рзЗ',
+                'ржХрзА', 'ржХрзЗ', 'ржХрзЛржерж╛ржпрж╝', 'ржХржЦржи', 'ржХрзАржнрж╛ржмрзЗ', 'ржХрзЗржи', 'ржпржЦржи', 'ржпрзЗржЦрж╛ржирзЗ',
+                'ржПржХржЯрж┐', 'ржжрзБржЯрж┐', 'рждрж┐ржиржЯрж┐', 'рж╣ржпрж╝рзЗржЫрзЗ', 'рж╣ржЪрзНржЫрзЗ', 'ржЫрж┐рж▓рзЗржи', 'ржЖржЫрзЗржи'
+            }
+        }
+        
+        # Hard reset patterns
+        self.hard_reset_patterns = {
+            'en': [
+                r'\b(new topic|different topic|change topic|moving on)\b',
+                r'\b(now let\'s|let\'s talk about|tell me about)\b',
+                r'\b(switch to|shifting to)\b'
+            ],
+            'bn': [
+                r'\b(ржирждрзБржи ржмрж┐рж╖ржпрж╝|ржнрж┐ржирзНржи ржмрж┐рж╖ржпрж╝|ржмрж┐рж╖ржпрж╝ ржкрж░рж┐ржмрж░рзНрждржи)\b',
+                r'\b(ржПржЦржи ржмрж▓рзБржи|ржПржЦржи ржЬрж╛ржирж╛ржмрзЗржи|ржПржЦржи ржмрж▓рж┐)\b',
+                r'\b(рж╕ржорзНржкрж░рзНржХрзЗ ржмрж▓рзБржи|рж╕ржорзНржкрж░рзНржХрзЗ ржЬрж╛ржирж╛ржи)\b'
+            ]
         }
     
-    # =========================================================
-    # 🚨 MISSING METHODS ADDED HERE
-    # =========================================================
-    def get_all_topics(self) -> List[str]:
-        """Returns a list of all unique topic names tracked so far."""
-        return [t.name for t in self.topics]
-
-    def get_topic_hints(self) -> Dict:
-        """Returns hints for the query refiner."""
-        current = self.get_current_topic()
-        return {
-            'current_topic': current.name if current else None,
-            'keywords': current.keywords if current else [],
-            'entities': list(current.entity_mentions.keys()) if current else []
-        }
-    # =========================================================
-
+    def _extract_keywords(self, text: str) -> Set[str]:
+        """Extract meaningful keywords (language-aware)"""
+        lang = self.normalizer.detect_language(text)
+        
+        if lang == 'en':
+            # English: extract words 5+ chars, lowercase
+            words = re.findall(r'\b\w{5,}\b', text.lower())
+        else:  # Bengali
+            # Bengali: extract words 5+ Bengali chars, no lowercasing
+            words = re.findall(r'[\u0980-\u09FF]{5,}', text)
+        
+        # Remove stopwords
+        stopwords = self.stopwords[lang]
+        keywords = {w for w in words if w not in stopwords}
+        
+        return keywords
+    
+    def _extract_entities(self, text: str) -> Set[str]:
+        """Extract named entities (language-aware)"""
+        lang = self.normalizer.detect_language(text)
+        entities = set()
+        
+        if lang == 'en':
+            # English: capitalized words/phrases
+            pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
+            entities = set(re.findall(pattern, text))
+        else:  # Bengali
+            # Bengali: Harder to detect entities without NER
+            # Heuristic: Look for repeated noun-like patterns
+            # For now, extract longer words that appear in both query and answer
+            words = re.findall(r'[\u0980-\u09FF]{4,}', text)
+            
+            # Simple frequency-based approach
+            word_counts = Counter(words)
+            # Entities often appear multiple times
+            entities = {word for word, count in word_counts.items() if count >= 2}
+        
+        return entities
+    
     def _find_similar_topic(self, topic_name: str, topic_embedding: np.ndarray) -> Optional[Topic]:
-        """Find existing topic using semantic similarity"""
+        """Find similar existing topic using embeddings"""
+        
         if not self.topics:
             return None
         
@@ -79,36 +163,34 @@ class EnhancedTopicTracker:
         
         # Merge if similarity is high
         if best_sim > 0.75:
-            print(f"  🔗 Merging '{topic_name}' into '{best_match.name}' (sim: {best_sim:.3f})")
+            print(f"  ЁЯФЧ Merging '{topic_name}' into '{best_match.name}' (sim: {best_sim:.3f})")
             return best_match
         
         return None
     
-    def _detect_intent(self, query: str) -> Optional[str]:
-        query_lower = query.lower()
-        for intent, keywords in self.intent_keywords.items():
-            if any(kw in query_lower for kw in keywords):
-                return intent
-        return None
-    
-    def _should_hard_reset(self, query: str) -> bool:
-        current_intent = self._detect_intent(query)
-        critical_intents = ['comparison', 'causal', 'listing']
-        
-        if (self.last_intent in critical_intents and 
-            current_intent in critical_intents and 
-            self.last_intent != current_intent):
-            print(f"  🔄 Hard reset: Intent changed from {self.last_intent} → {current_intent}")
-            self.last_intent = current_intent
-            return True
-        
-        self.last_intent = current_intent
-        return False
-    
-    def get_current_topic_with_entities(self, query: str) -> Tuple[Optional[Topic], float]:
+    def get_current_topic(self) -> Optional[Topic]:
+        """Get the currently active topic"""
         if not self.topics:
-            return None, 0.0
+            return None
         
+        # Get most recently mentioned topic with high confidence
+        recent_topics = [
+            t for t in self.topics 
+            if self.turn_number - t.last_mentioned <= 2
+        ]
+        
+        if not recent_topics:
+            return None
+        
+        # Return highest confidence recent topic
+        return max(recent_topics, key=lambda t: t.confidence)
+    
+    def get_all_topics(self) -> Set[str]:
+        """Get all topic names"""
+        return {t.name for t in self.topics}
+    
+    def match_topic_to_query(self, query: str) -> Tuple[Optional[Topic], float]:
+        """Match query to existing topics using entity overlap"""
         query_entities = self._extract_entities(query)
         
         recent_topics = [
@@ -132,134 +214,165 @@ class EnhancedTopicTracker:
         return best_topic, entity_overlap
     
     def get_dynamic_retrieval_k(self) -> int:
+        """Get dynamic retrieval K based on topic confidence"""
         current_topic = self.get_current_topic()
         if not current_topic:
             return 8
         
         confidence = current_topic.confidence
-        if confidence > 0.8: return 5
-        elif confidence > 0.6: return 7
-        else: return 10
+        if confidence > 0.8:
+            return 5
+        elif confidence > 0.6:
+            return 7
+        else:
+            return 10
+    
+    def _should_hard_reset(self, query: str) -> bool:
+        """Detect explicit topic changes (language-aware)"""
+        lang = self.normalizer.detect_language(query)
+        query_normalized = self.normalizer.normalize(query)
+        
+        patterns = self.hard_reset_patterns[lang]
+        
+        for pattern in patterns:
+            if re.search(pattern, query_normalized):
+                print(f"  ЁЯФД Hard reset detected")
+                return True
+        
+        return False
     
     def update(self, query: str, answer: str, retrieved_chunks: List[str] = None):
+        """Update topic tracking with new turn (multilingual)"""
         self.turn_number += 1
+        lang = self.normalizer.detect_language(query)
         
+        # Hard reset if explicit topic change
         if self._should_hard_reset(query):
             for topic in self.topics:
                 topic.confidence *= 0.3
         
-        entities = self._extract_entities(query + " " + answer)
-        keywords = self._extract_keywords(query + " " + answer)
+        # Extract keywords and entities
+        combined_text = query + " " + answer
+        keywords = self._extract_keywords(combined_text)
+        entities = self._extract_entities(combined_text)
         
+        # Update entity history
         for entity in entities:
-            self.entity_history[entity] += 1
+            self.entity_history[entity] = self.entity_history.get(entity, 0) + 1
         
-        current_topic_name = self._identify_topic(entities, keywords)
+        if not keywords:
+            return
         
-        if current_topic_name:
-            topic_embedding = self.embedder.get_embedding(current_topic_name)
-            existing = self._find_similar_topic(current_topic_name, topic_embedding)
-            
-            if existing:
-                existing.last_mentioned = self.turn_number
-                existing.keywords = list(set(existing.keywords + keywords[:5]))
-                existing.confidence = min(1.0, existing.confidence + 0.1)
-                for entity in entities:
-                    existing.entity_mentions[entity] += 1
-            else:
-                new_topic = Topic(
-                    name=current_topic_name,
-                    keywords=keywords[:5],
-                    confidence=0.5,
-                    first_mentioned=self.turn_number,
-                    last_mentioned=self.turn_number,
-                    embedding=topic_embedding,
-                    entity_mentions=Counter(entities)
-                )
-                self.topics.append(new_topic)
-        
-        # Decay
-        for topic in self.topics:
-            if topic.last_mentioned < self.turn_number - 3:
-                topic.confidence *= 0.8
-    
-    def get_current_topic(self) -> Optional[Topic]:
-        if not self.topics: return None
-        recent_topics = [t for t in self.topics if self.turn_number - t.last_mentioned <= 3]
-        if not recent_topics: return None
-        return max(recent_topics, key=lambda t: t.confidence)
-    
-    def _extract_entities(self, text: str) -> List[str]:
-        pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
-        entities = re.findall(pattern, text)
-        stopwords = {'According', 'The', 'This', 'That', 'These', 'Those',
-                    'There', 'Here', 'What', 'When', 'Where', 'Who', 'How'}
-        entities = [e for e in entities if e not in stopwords]
-        return list(set(entities))
-    
-    def _extract_keywords(self, text: str) -> List[str]:
-        words = re.findall(r'\b\w{5,}\b', text.lower())
-        common = {'about', 'would', 'could', 'should', 'their', 'there',
-                 'which', 'these', 'those', 'where', 'other', 'being'}
-        words = [w for w in words if w not in common]
-        word_counts = Counter(words)
-        return [word for word, _ in word_counts.most_common(10)]
-    
-    def _identify_topic(self, entities: List[str], keywords: List[str]) -> Optional[str]:
+        # Determine topic name (most common entity or keyword)
         if entities:
-            entity_scores = {e: self.entity_history.get(e, 0) for e in entities}
-            if entity_scores:
-                return max(entity_scores, key=entity_scores.get)
-        if keywords:
-            keyword_scores = Counter(keywords)
-            if keyword_scores:
-                return keyword_scores.most_common(1)[0][0]
-        return None
+            # Use most frequent entity
+            entity_counts = Counter(entities)
+            topic_name = entity_counts.most_common(1)[0][0]
+        else:
+            # Use most common keyword
+            topic_name = list(keywords)[0]
+        
+        # Create embedding for topic
+        topic_embedding = self.embedder.get_embedding(topic_name)
+        
+        # Check for similar existing topic
+        similar_topic = self._find_similar_topic(topic_name, topic_embedding)
+        
+        if similar_topic:
+            # Merge into existing topic
+            similar_topic.keywords.update(keywords)
+            similar_topic.confidence = min(1.0, similar_topic.confidence + 0.2)
+            similar_topic.last_mentioned = self.turn_number
+            
+            # Update entity mentions
+            for entity in entities:
+                similar_topic.entity_mentions[entity] = \
+                    similar_topic.entity_mentions.get(entity, 0) + 1
+            
+            print(f"  ЁЯУМ Reinforced topic: '{similar_topic.name}' (conf: {similar_topic.confidence:.2f})")
+        
+        else:
+            # Create new topic
+            new_topic = Topic(
+                name=topic_name,
+                keywords=keywords,
+                embedding=topic_embedding,
+                confidence=0.7,
+                last_mentioned=self.turn_number,
+                entity_mentions={e: 1 for e in entities},
+                language=lang
+            )
+            
+            self.topics.append(new_topic)
+            print(f"  тЬи New topic: '{topic_name}' ({lang})")
+        
+        # Decay old topics
+        for topic in self.topics:
+            if topic.last_mentioned < self.turn_number:
+                decay = 0.1 * (self.turn_number - topic.last_mentioned)
+                topic.confidence = max(0.1, topic.confidence - decay)
+    
+    def get_context(self) -> str:
+        """Get current topic context string"""
+        current_topic = self.get_current_topic()
+        
+        if not current_topic:
+            return ""
+        
+        # Return topic name for context
+        return current_topic.name
+
+
+# ==========================================
+# Citation Validator
+# ==========================================
 
 class CitationValidator:
     """
-    Validates that answers are grounded in retrieved chunks using embeddings.
+    Validates if generated answers are grounded in retrieved chunks
+    Language-agnostic (works for both English and Bengali)
     """
     
     def __init__(self, embedder):
         self.embedder = embedder
     
-    def validate_answer(self, answer: str, chunks: List[str]) -> Tuple[bool, List[str], float]:
-        claims = [s.strip() for s in answer.split('.') if len(s.strip()) > 10]
+    def validate_answer(
+        self, 
+        answer: str, 
+        retrieved_chunks: List[str]
+    ) -> Tuple[bool, List[str], float]:
+        """
+        Validate answer against retrieved chunks using embeddings
         
-        if not claims:
-            return True, [], 1.0
-        
-        supported_claims = 0
-        supporting_chunks = []
-        
-        if not chunks:
+        Returns:
+            is_grounded: bool - Whether answer is grounded
+            supporting_chunks: List[str] - Chunks that support the answer
+            confidence: float - Grounding confidence score
+        """
+        if not retrieved_chunks or not answer:
             return False, [], 0.0
-            
-        # Batch encode chunks
-        chunk_embs = np.array([
+        
+        # Get embeddings
+        answer_embedding = self.embedder.get_embedding(answer)
+        chunk_embeddings = np.array([
             self.embedder.get_embedding(chunk) 
-            for chunk in chunks
+            for chunk in retrieved_chunks
         ])
         
-        for claim in claims:
-            claim_emb = self.embedder.get_embedding(claim)
-            
-            similarities = cosine_similarity(
-                claim_emb.reshape(1, -1),
-                chunk_embs
-            )[0]
-            
-            best_match_idx = np.argmax(similarities)
-            best_match_score = similarities[best_match_idx]
-            
-            # Adjusted threshold to 0.65 for better precision
-            if best_match_score > 0.65: 
-                supported_claims += 1
-                supporting_chunks.append(best_match_idx)
+        # Calculate similarities
+        similarities = cosine_similarity(
+            answer_embedding.reshape(1, -1),
+            chunk_embeddings
+        )[0]
         
-        confidence = supported_claims / len(claims) if claims else 1.0
+        # Get confidence (max similarity)
+        confidence = float(np.max(similarities))
         
-        is_grounded = confidence > 0.7
+        # Identify supporting chunks (similarity > 0.5)
+        supporting_indices = np.where(similarities > 0.5)[0]
+        supporting_chunks = [retrieved_chunks[i] for i in supporting_indices]
         
-        return is_grounded, list(set(supporting_chunks)), confidence
+        # Grounding threshold
+        is_grounded = confidence > 0.6
+        
+        return is_grounded, supporting_chunks, confidence

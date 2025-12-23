@@ -1,7 +1,28 @@
 import re
-from typing import List, Tuple, Dict
+from typing import List, Dict
 from collections import Counter
-from models import GroqLLM
+
+class TextNormalizer:
+    """Language-aware text normalization utilities"""
+    
+    @staticmethod
+    def is_bengali(text: str) -> bool:
+        """Check if text contains Bengali characters"""
+        bengali_chars = sum(1 for c in text if '\u0980' <= c <= '\u09FF')
+        return bengali_chars > len(text) * 0.2
+    
+    @staticmethod
+    def normalize(text: str) -> str:
+        """Normalize text based on detected language"""
+        if TextNormalizer.is_bengali(text):
+            return text  # No case conversion for Bengali
+        return text.lower()  # Lowercase for English
+    
+    @staticmethod
+    def detect_language(text: str) -> str:
+        """Detect text language"""
+        return 'bn' if TextNormalizer.is_bengali(text) else 'en'
+
 
 class PromptBuilder:
     SYSTEM_PROMPT = """You are an expert AI tutor.
@@ -12,7 +33,7 @@ RULES:
 3. Cite your sources implicitly (e.g., "According to the text...").
 4. Be concise but comprehensive.
 """
-
+    
     @staticmethod
     def build(query: str, chunks: List[str], history: List[Dict]) -> str:
         context_str = "\n---\n".join(chunks)
@@ -29,18 +50,64 @@ Context Information:
 {context_str}
 
 User Question: {query}
+
 Answer:"""
+
 
 class AdvancedQueryRefiner:
     """
     Tier 2 Query Refinement with Multi-Strategy Approach
     Handles pronouns, vague queries, and context dependencies
+    Supports both English and Bengali
     """
     
     def __init__(self, llm):
         self.llm = llm
         self.last_entities = []  # Track mentioned entities
+        self.normalizer = TextNormalizer()
         
+        # Pronouns by language
+        self.pronouns = {
+            'en': {
+                'he', 'she', 'it', 'they', 'this', 'that', 'these', 'those',
+                'his', 'her', 'its', 'their', 'him', 'them', 'we', 'us', 'our'
+            },
+            'bn': {
+                'সে', 'তিনি', 'তারা', 'তাকে', 'তাদের', 'তার', 
+                'এটি', 'ওটি', 'এগুলো', 'ওগুলো', 'সেটি', 'ওই',
+                'আমরা', 'আমাদের', 'তোমরা', 'তোমাদের'
+            }
+        }
+        
+        # Vague command words
+        self.vague_commands = {
+            'en': [
+                'elaborate', 'explain', 'tell', 'show', 'give',
+                'do', 'what', 'how', 'describe', 'more', 'who', 'why'
+            ],
+            'bn': [
+                'ব্যাখ্যা', 'বলুন', 'জানান', 'দেখান', 'দিন',
+                'করুন', 'কী', 'কীভাবে', 'বর্ণনা', 'আরো', 'কে', 'কেন',
+                'বুঝান', 'বিস্তারিত', 'সম্পর্কে'
+            ]
+        }
+        
+        # Follow-up indicators
+        self.followup_words = {
+            'en': {'also', 'too', 'additionally', 'furthermore', 'moreover', 'previous', 'earlier'},
+            'bn': {'এছাড়াও', 'আরও', 'তাছাড়া', 'পূর্বে', 'আগে', 'ও', 'এবং'}
+        }
+        
+        # Meta-question patterns
+        self.meta_patterns = {
+            'en': ["talking about", "referred to", "mentioned"],
+            'bn': ["সম্পর্কে বলছেন", "উল্লেখ করা", "বলেছেন"]
+        }
+    
+    def detect_language(self, text: str) -> str:
+        """Detect query language"""
+        return self.normalizer.detect_language(text)
+    
     def refine(self, query: str, history: List[Dict], topic_context: str = "") -> str:
         """
         Multi-stage refinement:
@@ -69,43 +136,39 @@ class AdvancedQueryRefiner:
         return query
     
     def _needs_refinement(self, query: str, history: List[Dict]) -> bool:
-        """Determine if query needs refinement"""
+        """Determine if query needs refinement (language-aware)"""
         
         if not history:
             return False
         
-        query_lower = query.lower()
-        words = query_lower.split()
+        lang = self.detect_language(query)
+        query_normalized = self.normalizer.normalize(query)
+        words = query_normalized.split()
         
-        # Check 1: Contains pronouns (ADDED 'we', 'us', 'our')
-        pronouns = {'he', 'she', 'it', 'they', 'this', 'that', 'these', 'those', 
-                   'his', 'her', 'its', 'their', 'him', 'them', 'we', 'us', 'our'}
-        has_pronouns = any(word in pronouns for word in words)
+        # Check 1: Contains pronouns
+        has_pronouns = any(word in self.pronouns[lang] for word in words)
         
-        # Check 2: Very short/vague (INCREASED to <= 6)
+        # Check 2: Very short/vague
         is_short = len(words) <= 6
         
-        # Check 3: Command-style (ADDED 'who', 'why')
-        vague_commands = ['elaborate', 'explain', 'tell', 'show', 'give', 
-                         'do', 'what', 'how', 'describe', 'more', 'who', 'why']
-        is_vague_command = any(query_lower.startswith(cmd) for cmd in vague_commands)
+        # Check 3: Vague command-style start
+        is_vague_command = any(query_normalized.startswith(cmd) for cmd in self.vague_commands[lang])
         
         # Check 4: Follow-up indicators
-        followup_words = {'also', 'too', 'additionally', 'furthermore', 'moreover', 'previous', 'earlier'}
-        is_followup = any(word in followup_words for word in words)
+        is_followup = any(word in self.followup_words[lang] for word in words)
         
         # Check 5: Incomplete questions
         is_incomplete = query.endswith('?') and len(words) <= 4
         
-        # Check 6: "Talking about" patterns (NEW)
-        is_meta_question = "talking about" in query_lower or "referred to" in query_lower
+        # Check 6: Meta-questions
+        is_meta_question = any(pattern in query_normalized for pattern in self.meta_patterns[lang])
         
         # Refine if ANY condition is true
         return (has_pronouns or is_short or is_vague_command or 
                 is_followup or is_incomplete or is_meta_question)
     
     def _extract_context(self, history: List[Dict]) -> Dict:
-        """Extract key entities and topics from history"""
+        """Extract key entities and topics from history (language-aware)"""
         
         context = {
             'entities': [],
@@ -120,19 +183,34 @@ class AdvancedQueryRefiner:
         recent = history[-3:]
         
         for entry in recent:
-            # Extract capitalized phrases (named entities)
             user_text = entry['user']
             ai_text = entry['ai'][:500]  # Limit length
             
-            # Find proper nouns and multi-word names
-            entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', 
-                                user_text + ' ' + ai_text)
-            context['entities'].extend(entities)
+            lang = self.detect_language(user_text + ' ' + ai_text)
             
-            # Extract key nouns (simple approach)
-            words = ai_text.split()
-            nouns = [w for w in words if len(w) > 4 and w[0].isupper()]
-            context['topics'].extend(nouns)
+            if lang == 'en':
+                # English: capitalized phrases
+                entities = re.findall(
+                    r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b',
+                    user_text + ' ' + ai_text
+                )
+                context['entities'].extend(entities)
+                
+                # Extract key nouns (simple approach)
+                words = ai_text.split()
+                nouns = [w for w in words if len(w) > 4 and w[0].isupper()]
+                context['topics'].extend(nouns)
+            
+            else:  # Bengali
+                # Bengali: Extract longer words (4+ chars)
+                words_bn = re.findall(r'[\u0980-\u09FF]{4,}', user_text + ' ' + ai_text)
+                
+                # Use frequency to identify likely entities/topics
+                word_counts = Counter(words_bn)
+                frequent_words = [word for word, count in word_counts.items() if count >= 2]
+                
+                context['entities'].extend(frequent_words)
+                context['topics'].extend(frequent_words)
         
         # Deduplicate and get most common
         if context['entities']:
@@ -144,7 +222,9 @@ class AdvancedQueryRefiner:
     
     def _llm_rewrite(self, query: str, history: List[Dict], 
                      context_info: Dict, topic_context: str = "") -> str:
-        """Use LLM to rewrite query with strong instructions"""
+        """Use LLM to rewrite query with strong instructions (multilingual)"""
+        
+        lang = self.detect_language(query)
         
         # Build history string (last 2 turns)
         hist_str = ""
@@ -158,15 +238,20 @@ class AdvancedQueryRefiner:
         # Build context hints
         hints = ""
         if topic_context:
-            hints += f"\nCurrent Topic Context: {topic_context}"
-        if context_info['last_subject']:
-            hints += f"\nMain subject: {context_info['last_subject']}"
-        if context_info['entities']:
-            hints += f"\nMentioned: {', '.join(context_info['entities'][:3])}"
+            if lang == 'en':
+                hints += f"\nCurrent Topic Context: {topic_context}"
+            else:
+                hints += f"\nবর্তমান বিষয়: {topic_context}"
         
-        # Inside processing.py -> AdvancedQueryRefiner -> _llm_rewrite
-
-        prompt = f"""You are a query rewriting expert.
+        if context_info['last_subject']:
+            if lang == 'en':
+                hints += f"\nMain subject: {context_info['last_subject']}"
+            else:
+                hints += f"\nমূল বিষয়: {context_info['last_subject']}"
+        
+        # Language-specific prompt
+        if lang == 'en':
+            prompt = f"""You are a query rewriting expert.
 
 Conversation History:
 {hist_str}
@@ -178,26 +263,48 @@ CRITICAL RULES:
 1. **New Entities:** If the Current Question contains a Specific Name (e.g., "Zainul Abedin"), USE IT. Do NOT replace it with the name from history.
 2. **Context:** Only add context if the question is vague (e.g., "what did he do?", "explain it").
 3. **Pronouns:** Replace pronouns (he, she, it, they, we) with the specific name or subject they refer to.
-4. **Meta-Questions:** If the user asks "who are we talking about?", rewrite it to clarify the previous subject (e.g., "Who is the subject of the previous discussion?").
+4. **Clarity:** Make the question self-contained and clear.
+5. **Brevity:** Keep it concise (1 sentence).
 
-EXAMPLES:
-- History: [Zahir Raihan] | Question: "when did he die" -> "when did Zahir Raihan die"
-- History: [Zahir Raihan] | Question: "Explain Zainul Abedin" -> "Explain Zainul Abedin" (New Name Kept)
-- History: [Comparison]   | Question: "who are we talking about" -> "Who were the subjects of the previous comparison?"
+Output ONLY the rewritten question. No explanation.
 
-Rewritten Question (respond with ONLY the refined question text):"""
+Rewritten Question:"""
+        
+        else:  # Bengali
+            prompt = f"""আপনি একটি প্রশ্ন পুনর্লিখন বিশেষজ্ঞ।
 
+কথোপকথনের ইতিহাস:
+{hist_str}
+{hints}
+
+বর্তমান প্রশ্ন: "{query}"
+
+গুরুত্বপূর্ণ নিয়ম:
+১. **নতুন নাম:** প্রশ্নে যদি নির্দিষ্ট নাম থাকে, তা ব্যবহার করুন।
+২. **প্রসঙ্গ:** শুধুমাত্র অস্পষ্ট প্রশ্নে প্রসঙ্গ যোগ করুন (যেমন "তিনি কী করেছিলেন?")।
+৩. **সর্বনাম:** সর্বনাম (সে, তিনি, এটি, তারা) প্রতিস্থাপন করুন নির্দিষ্ট নাম দিয়ে।
+৪. **স্পষ্টতা:** প্রশ্নটি স্বয়ংসম্পূর্ণ এবং স্পষ্ট করুন।
+৫. **সংক্ষিপ্ততা:** একটি বাক্যে রাখুন।
+
+শুধুমাত্র পুনর্লিখিত প্রশ্ন লিখুন। ব্যাখ্যা নয়।
+
+পুনর্লিখিত প্রশ্ন:"""
+        
         try:
-            response = self.llm.generate(prompt, temperature=0.2)
+            response = self.llm.generate(prompt, temperature=0.3)
             
             # Clean response
             refined = response.strip()
             refined = refined.strip('"').strip("'").strip()
             
-            # Remove common prefixes
-            prefixes = ['rewritten question:', 'question:', 'refined:']
+            # Remove common prefixes (language-aware)
+            if lang == 'en':
+                prefixes = ['rewritten question:', 'question:', 'refined:']
+            else:
+                prefixes = ['পুনর্লিখিত প্রশ্ন:', 'প্রশ্ন:', 'উত্তর:']
+            
             for prefix in prefixes:
-                if refined.lower().startswith(prefix):
+                if self.normalizer.normalize(refined).startswith(self.normalizer.normalize(prefix)):
                     refined = refined[len(prefix):].strip()
             
             return refined
@@ -207,7 +314,9 @@ Rewritten Question (respond with ONLY the refined question text):"""
             return query
     
     def _validate_refinement(self, refined: str, original: str) -> bool:
-        """Validate that refinement is reasonable"""
+        """Validate that refinement is reasonable (language-aware)"""
+        
+        lang = self.detect_language(original)
         
         # Check 1: Not too long
         if len(refined.split()) > 30:
@@ -218,30 +327,42 @@ Rewritten Question (respond with ONLY the refined question text):"""
             return False
         
         # Check 3: Actually different
-        if refined.lower() == original.lower():
+        if self.normalizer.normalize(refined) == self.normalizer.normalize(original):
             return False
         
-        # Check 4: Contains question words (for questions)
+        # Check 4: Preserve question format
         if original.endswith('?') and not refined.endswith('?'):
-            # If original was a question, refined should be too
-            question_words = ['what', 'when', 'where', 'who', 'how', 'why', 'which']
-            if not any(refined.lower().startswith(qw) for qw in question_words):
+            # Define question words by language
+            if lang == 'en':
+                question_words = ['what', 'when', 'where', 'who', 'how', 'why', 'which']
+            else:
+                question_words = ['কী', 'কে', 'কোথায়', 'কখন', 'কীভাবে', 'কেন', 'কোন']
+            
+            refined_normalized = self.normalizer.normalize(refined)
+            if not any(refined_normalized.startswith(qw) for qw in question_words):
                 return False
         
         return True
-        
+
+
 class MultiQueryGenerator:
     """
     Tier 2 Enhancement: Generate multiple query variants
     Improves recall by searching with different phrasings
+    Supports both English and Bengali
     """
     
     def __init__(self, llm):
         self.llm = llm
-        
+        self.normalizer = TextNormalizer()
+    
+    def detect_language(self, text: str) -> str:
+        """Detect query language"""
+        return self.normalizer.detect_language(text)
+    
     def generate_variants(self, query: str, num_variants: int = 2) -> List[str]:
         """
-        Generate alternative query phrasings
+        Generate alternative query phrasings (multilingual)
         Returns: [original_query, variant1, variant2, ...]
         """
         
@@ -249,7 +370,10 @@ class MultiQueryGenerator:
         if len(query.split()) <= 3:
             return [query]
         
-        prompt = f"""Given this question: "{query}"
+        lang = self.detect_language(query)
+        
+        if lang == 'en':
+            prompt = f"""Given this question: "{query}"
 
 Generate {num_variants} alternative ways to ask the same question that might retrieve different relevant information.
 
@@ -274,12 +398,35 @@ Now generate {num_variants} variants for: "{query}"
 Respond ONLY with the variants, one per line, numbered:
 1. [variant 1]
 2. [variant 2]"""
+        
+        else:  # Bengali
+            prompt = f"""এই প্রশ্নের জন্য: "{query}"
 
+{num_variants}টি বিকল্প উপায়ে একই প্রশ্ন তৈরি করুন যা বিভিন্ন প্রাসঙ্গিক তথ্য পুনরুদ্ধার করতে পারে।
+
+নিয়ম:
+১. ভিন্ন শব্দভাণ্ডার ব্যবহার করুন (প্রতিশব্দ)
+২. গঠন পরিবর্তন করুন
+৩. মূল অর্থ অভিন্ন রাখুন
+৪. প্রতিটি বৈকল্পিক ১ বাক্য হতে হবে
+৫. নির্দিষ্ট হন, অস্পষ্ট নয়
+
+উদাহরণ:
+প্রশ্ন: "জহির রায়হানের চলচ্চিত্রে অবদান কী ছিল?"
+বৈকল্পিক ১: "জহির রায়হান কোন চলচ্চিত্র তৈরি করেছেন এবং তারা বাংলাদেশে কীভাবে প্রভাব ফেলেছে?"
+বৈকল্পিক ২: "জহির রায়হান চলচ্চিত্র শিল্পে কীভাবে প্রভাব ফেলেছেন?"
+
+এখন "{query}" এর জন্য {num_variants}টি বৈকল্পিক তৈরি করুন।
+
+শুধুমাত্র বৈকল্পিকগুলো লিখুন, প্রতিটি আলাদা লাইনে, সংখ্যা দিয়ে:
+১. [বৈকল্পিক ১]
+২. [বৈকল্পিক ২]"""
+        
         try:
             response = self.llm.generate(prompt, temperature=0.7)
             
             # Parse variants
-            variants = self._parse_variants(response)
+            variants = self._parse_variants(response, lang)
             
             # Validate variants
             valid_variants = [v for v in variants if self._validate_variant(v, query)]
@@ -291,17 +438,21 @@ Respond ONLY with the variants, one per line, numbered:
             print(f"  ⚠️ Variant generation failed: {e}")
             return [query]
     
-    def _parse_variants(self, response: str) -> List[str]:
-        """Parse LLM response into list of variants"""
+    def _parse_variants(self, response: str, lang: str) -> List[str]:
+        """Parse LLM response into list of variants (language-aware)"""
         
         variants = []
         
-        # Try numbered format first: "1. variant"
-        numbered = re.findall(r'\d+\.\s*(.+?)(?:\n|$)', response)
+        # Try numbered format
+        if lang == 'en':
+            numbered = re.findall(r'\d+\.\s*(.+?)(?:\n|$)', response)
+        else:  # Bengali - support Bengali numerals too
+            numbered = re.findall(r'[\d০-৯]+\.\s*(.+?)(?:\n|$)', response)
+        
         if numbered:
             variants.extend(numbered)
         
-        # Try line-by-line
+        # Try line-by-line fallback
         if not variants:
             lines = [l.strip() for l in response.split('\n') if l.strip()]
             variants.extend(lines)
@@ -313,21 +464,21 @@ Respond ONLY with the variants, one per line, numbered:
         return variants
     
     def _validate_variant(self, variant: str, original: str) -> bool:
-        """Check if variant is valid"""
+        """Check if variant is valid (language-aware)"""
         
         # Not too long
         if len(variant.split()) > 30:
             return False
         
         # Not identical to original
-        if variant.lower() == original.lower():
+        if self.normalizer.normalize(variant) == self.normalizer.normalize(original):
             return False
         
         # Contains some overlap with original (not completely different)
-        orig_words = set(original.lower().split())
-        var_words = set(variant.lower().split())
+        orig_words = set(self.normalizer.normalize(original).split())
+        var_words = set(self.normalizer.normalize(variant).split())
         
-        # Should share at least 20% of content words
+        # Extract content words (> 3 chars)
         content_words_orig = {w for w in orig_words if len(w) > 3}
         content_words_var = {w for w in var_words if len(w) > 3}
         

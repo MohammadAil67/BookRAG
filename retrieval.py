@@ -1,6 +1,7 @@
 import re
 import numpy as np
 from typing import List, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.metrics.pairwise import cosine_similarity
 from rank_bm25 import BM25Okapi
 from config import Config
@@ -48,8 +49,8 @@ class HybridRetriever:
     
 class MultiQueryRetriever:
     """
-    Enhanced retriever that uses multiple query variants.
-    Wraps the TopicAwareRetriever.
+    Enhanced retriever with PARALLEL multi-query processing.
+    Uses ThreadPoolExecutor for concurrent retrieval.
     """
     
     def __init__(self, base_retriever, query_generator, reranker, config, chunks):
@@ -57,13 +58,13 @@ class MultiQueryRetriever:
         self.query_generator = query_generator
         self.reranker = reranker
         self.config = config
-        self.chunks = chunks # Explicitly passed to avoid deep attribute access
+        self.chunks = chunks
         
     def retrieve(self, query: str, history: List[Dict]) -> List[int]:
         """
-        Retrieve using multiple query variants:
+        Retrieve using multiple query variants IN PARALLEL:
         1. Generate query variants
-        2. Retrieve with each variant
+        2. Retrieve with each variant concurrently
         3. Merge and deduplicate results
         4. Rerank all candidates with original query
         """
@@ -72,15 +73,32 @@ class MultiQueryRetriever:
         queries = self.query_generator.generate_variants(query, num_variants=2)
         
         if len(queries) > 1:
-            print(f"  🔄 Using {len(queries)} query variants")
+            print(f"  🔄 Using {len(queries)} query variants (parallel processing)")
             for i, q in enumerate(queries):
                 if i > 0: print(f"     {i}. {q[:60]}...")
         
-        # Retrieve with each variant
+        # Retrieve with each variant IN PARALLEL
         all_indices = set()
         
-        for variant_query in queries:
-            indices = self.base_retriever.retrieve(variant_query)  # HybridRetriever doesn't need history
+        if len(queries) > 1:
+            # Use multithreading for multiple queries
+            with ThreadPoolExecutor(max_workers=min(len(queries), 4)) as executor:
+                # Submit all retrieval tasks
+                future_to_query = {
+                    executor.submit(self.base_retriever.retrieve, variant_query): variant_query
+                    for variant_query in queries
+                }
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_query):
+                    try:
+                        indices = future.result()
+                        all_indices.update(indices)
+                    except Exception as e:
+                        print(f"  ⚠️ Retrieval failed for a variant: {e}")
+        else:
+            # Single query - no threading needed
+            indices = self.base_retriever.retrieve(queries[0])
             all_indices.update(indices)
         
         # Convert to list
@@ -88,16 +106,14 @@ class MultiQueryRetriever:
         
         print(f"  📊 Multi-query retrieved {len(candidate_indices)} unique chunks")
         
-        # If we got too many, rerank everything with original query
-        # or if we have results, we always want to rerank the merged set against the original query
+        # Rerank with ORIGINAL query
         if candidate_indices:
             candidate_chunks = [
                 self.chunks[i] 
                 for i in candidate_indices
             ]
             
-            # Rerank with ORIGINAL query (most important)
-            # We use a slightly higher top_k here to ensure we don't cut off good results too early
+            # Rerank with higher top_k to avoid cutting off good results
             rerank_k = min(len(candidate_indices), self.config.FINAL_TOP_K + 2)
             
             reranked = self.reranker.rerank(

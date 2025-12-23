@@ -7,7 +7,7 @@ from config import Config
 class GroqLLM:
     def __init__(self, api_key: str):
         self.client = Groq(api_key=api_key)
-        self.model_name = "llama-3.1-8b-instant"
+        self.model_name = "meta-llama/llama-4-maverick-17b-128e-instruct"
     
     def generate(self, prompt: str, temperature: float = 0.5) -> str:
         try:
@@ -31,7 +31,7 @@ class Embedder:
 
 class Reranker:
     def __init__(self, config: Config):
-        self.model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        self.model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
 
     def rerank(self, query: str, chunks: List[str], top_k: int) -> List[Tuple[int, float]]:
         if not chunks: return []

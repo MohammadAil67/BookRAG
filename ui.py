@@ -17,6 +17,7 @@ import os
 # Set page config
 st.set_page_config(page_title="AI Tutor", page_icon="📚", layout="wide")
 
+
 # Initialize RAG System
 @st.cache_resource
 def initialize_rag(pdf_path=None):
@@ -39,6 +40,7 @@ def init_practice_state():
             'submitted': False,
             'score': 0
         }
+
 
 # Initialize Session State
 if 'messages' not in st.session_state:
@@ -321,7 +323,7 @@ def render_practice_view():
         with col1:
             # Auto-fill current topic from conversation
             topic_info = rag.get_topic_status()
-            default_topic = topic_info.get('current_topic', {}).name if topic_info.get('current_topic') else ""
+            default_topic = topic_info.get('current_topic') or ""
             
             topic = st.text_input("Topic to Practice", value=default_topic, placeholder="e.g. Newton's Third Law")
         
