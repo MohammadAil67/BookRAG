@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from utils.session_state import get_ui_text
 from utils.translation_utils import get_translator
+from topics import EnhancedTopicTracker
 
 def render_progress_tracker_view():
     """Render progress tracking dashboard"""
@@ -214,10 +215,12 @@ def _render_topics_covered():
     """Render topics covered tab"""
     st.subheader(get_ui_text('topics_explored'))
     rag = st.session_state.rag_system
-    topics = rag.topic_tracker.get_all_topics()
+
+    topic_tracker = rag.topic_tracker
+    topics = topic_tracker.get_all_topics()
     
     if topics:
-        topic_info = rag.get_topic_status()
+        topic_info = topic_tracker.get_topic_hints()
         current_topic = topic_info.get('current_topic', 'N/A')
         
         st.write(f"**{get_ui_text('currently_studying')}:** {current_topic}")
