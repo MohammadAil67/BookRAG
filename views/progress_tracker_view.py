@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from utils.session_state import get_ui_text
 from utils.translation_utils import get_translator
+from topics import EnhancedTopicTracker
 
 def render_progress_tracker_view():
     """Render progress tracking dashboard"""
