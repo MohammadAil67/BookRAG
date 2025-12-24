@@ -211,11 +211,7 @@ class RAGSystem:
         1. "correct_answer" must be an exact string match to one of the "options".
         2. "explanation" must explain WHY the answer is correct based on the text.
         3. Do not use outside knowledge; strictly use the provided context.
-<<<<<<< HEAD
         4. If the topic is mathematical and if there are mathematical data in the context, include at least one math-related question.
-=======
-        4. If there are mathematical data in the context, include at least one math-related question.
->>>>>>> ab0fe7484f3c26cf6bd1ff2344649e4b20cb02e2
         5. And if it is a mathematical question the answer should not be from the context.
         """
 

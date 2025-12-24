@@ -214,16 +214,32 @@ def _render_topics_covered():
     """Render topics covered tab"""
     st.subheader(get_ui_text('topics_explored'))
     rag = st.session_state.rag_system
-    topics = rag.topic_tracker.get_all_topics()
     
-    if topics:
-        topic_info = rag.get_topic_status()
-        current_topic = topic_info.get('current_topic', 'N/A')
+    # Get topics with fallback
+    try:
+        topics = rag.topic_tracker.get_topic_hints(['current_topic'])
+    except Exception:
+        topics = []
+    
+    # Validate and filter topics before processing
+    topics_list = [t for t in topics if t and isinstance(t, str) and t.strip()] if topics else []
+    
+    if topics_list:
+        # Get current topic with fallback
+        try:
+            topic_info = rag.get_current_topic()
+            current_topic = topic_info.get('current_topic', 'N/A') if topic_info else 'N/A'
+        except Exception:
+            current_topic = 'N/A'
+        
+        # Ensure current_topic is valid
+        if not current_topic or not isinstance(current_topic, str) or not current_topic.strip():
+            current_topic = 'N/A'
         
         st.write(f"**{get_ui_text('currently_studying')}:** {current_topic}")
         st.write(f"**{get_ui_text('all_topics_covered')}:**")
         
-        for topic in topics:
+        for topic in topics_list:
             st.markdown(f"- {topic}")
         
         if st.button(get_ui_text('suggest_next_topics')):
@@ -235,23 +251,37 @@ def _render_topics_covered():
             interface_lang = st.session_state.interface_language
             
             with st.spinner(get_ui_text('analyzing_gaps')):
+                # Topics already validated at the top
+                topics_str = ', '.join(topics_list)
+                
                 suggest_prompt = f"""Based on these topics the student has covered:
-{', '.join(topics)}
+{topics_str}
 
 And the PDF content available, suggest 3-5 related topics they should explore next.
 Make suggestions that build on what they know."""
 
-                # Get suggestions in English
-                suggestions_en = rag.ask(suggest_prompt)
+                try:
+                    # Get suggestions in English
+                    suggestions_en = rag.ask(suggest_prompt)
+                    
+                    # Translate if interface is Bengali
+                    if interface_lang == 'bn':
+                        suggestions = translator.translate_en_to_bn(suggestions_en)
+                    else:
+                        suggestions = suggestions_en
+                    
+                    st.markdown(f"### {get_ui_text('suggested_topics_header')}")
+                    st.markdown(suggestions)
                 
-                # Translate if interface is Bengali
-                if interface_lang == 'bn':
-                    suggestions = translator.translate_en_to_bn(suggestions_en)
-                else:
-                    suggestions = suggestions_en
-                
-                st.markdown(f"### {get_ui_text('suggested_topics_header')}")
-                st.markdown(suggestions)
+                except Exception as e:
+                    # Fallback error handling
+                    st.error(f"{get_ui_text('error')}: {str(e)}")
+                    
+                    # Provide generic suggestions as fallback
+                    if interface_lang == 'bn':
+                        st.info("সাধারণ পরামর্শ: পূর্ববর্তী বিষয়গুলি পর্যালোচনা করুন এবং সম্পর্কিত অধ্যায়গুলি অন্বেষণ করুন।")
+                    else:
+                        st.info("General suggestion: Review previous topics and explore related chapters.")
     else:
         st.info(get_ui_text('no_topics_yet'))
 
