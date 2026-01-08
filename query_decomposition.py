@@ -88,6 +88,11 @@ class QueryDecomposer:
         """
         lang = self.detect_language(query)
         query_normalized = self.normalizer.normalize(query)
+
+        if lang == 'en':
+            pronouns = ['she', 'he', 'it', 'they', 'her', 'him', 'them', 'his', 'their']
+            if any(f' {p} ' in f' {query_normalized} ' for p in pronouns):
+                return False, 'none'
         
         # Check for comparison keywords
         for keyword in self.comparison_keywords[lang]:
@@ -112,9 +117,14 @@ class QueryDecomposer:
     def _is_multipart_query(self, query: str, lang: str) -> bool:
         """Check if query has multiple parts connected by conjunctions"""
         query_normalized = self.normalizer.normalize(query)
+
+        strict_conjunctions = {
+            'en': [' and '],
+            'bn': [' এবং ', ' আর ']
+        }
         
         # Must have conjunction
-        has_conjunction = any(conj in query_normalized for conj in self.conjunctions[lang])
+        has_conjunction = any(conj in query_normalized for conj in strict_conjunctions[lang])
         if not has_conjunction:
             return False
         

@@ -1,11 +1,14 @@
 """
 Practice view for interactive quizzes with Translation Support and Study Plan Integration
+Enhanced with Timer and Navigation Restrictions + Tab Visibility Detection
 """
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 from utils.quiz_helpers import save_quiz_result
 from utils.session_state import get_ui_text
 from utils.translation_utils import get_translator
+import time
+import streamlit.components.v1 as components
 
 def render_practice_view():
     """Render the practice/quiz interface"""
@@ -13,14 +16,13 @@ def render_practice_view():
     
     if not st.session_state.rag_system:
         st.warning(get_ui_text('load_pdf_warning'))
-        st.info("👆 Please load a PDF in the Chat section first")
+        st.info("💡 Please load a PDF in the Chat section first")
         return
     
     # Check for study plan navigation - HANDLE IT COMPLETELY
     if st.session_state.get('navigate_to_practice'):
         _handle_study_plan_quiz_generation()
-        # Don't show quiz setup when navigating from study plan
-        return  # Now we can return because we've handled everything
+        return
     
     # Normal quiz flow continues below...
     rag = st.session_state.rag_system
@@ -29,7 +31,7 @@ def render_practice_view():
     if not st.session_state.quiz_state['active']:
         _render_quiz_setup(rag)
     
-    # Take Quiz Section
+    # Take Quiz Section with Timer
     if st.session_state.quiz_state['active']:
         _render_quiz_form()
     
@@ -49,18 +51,20 @@ def _handle_study_plan_quiz_generation():
     with col1:
         st.caption(get_ui_text('study_plan_quiz_info'))
     with col2:
-        if st.button(get_ui_text('back_to_plan'), type="secondary"):
-            st.session_state.navigate_to_practice = None
-            st.session_state.regenerate_study_quiz = False
-            st.session_state.view = 'Study Plan'
-            st.rerun()
+        # Only allow back button if quiz is not active or already submitted
+        if not st.session_state.quiz_state['active'] or st.session_state.quiz_state['submitted']:
+            if st.button(get_ui_text('back_to_plan'), type="secondary"):
+                st.session_state.navigate_to_practice = None
+                st.session_state.regenerate_study_quiz = False
+                st.session_state.view = 'Study Plan'
+                st.rerun()
     
     st.divider()
     
     # Check if quiz needs to be generated
     if not st.session_state.quiz_state['active'] or st.session_state.get('regenerate_study_quiz'):
         _generate_study_plan_quiz(nav_data)
-        return  # Exit after generation to wait for rerun
+        return
     
     # Show quiz (quiz is already generated and active)
     if st.session_state.quiz_state['active'] and not st.session_state.quiz_state['submitted']:
@@ -69,7 +73,6 @@ def _handle_study_plan_quiz_generation():
     # Results with study plan integration
     if st.session_state.quiz_state['submitted']:
         _render_quiz_results(from_study_plan=True)
-
 
 
 def _generate_study_plan_quiz(nav_data):
@@ -99,6 +102,9 @@ def _generate_study_plan_quiz(nav_data):
             if interface_lang == 'bn':
                 quiz_data = _translate_quiz(quiz_data, translator)
             
+            # Initialize timer
+            time_limit = nav_data['num_questions'] * 60  # 1 minute per question
+            
             st.session_state.quiz_state = {
                 'active': True,
                 'data': quiz_data,
@@ -111,9 +117,12 @@ def _generate_study_plan_quiz(nav_data):
                 'study_plan_context': {
                     'topic_idx': nav_data['topic_idx'],
                     'part_idx': nav_data['part_idx']
-                }
+                },
+                'start_time': datetime.now(),
+                'time_limit': time_limit
             }
             st.session_state.regenerate_study_quiz = False
+            st.session_state.quiz_locked = True  # Lock navigation
             st.success(get_ui_text('quiz_ready'))
             st.rerun()
         else:
@@ -182,15 +191,21 @@ def _render_quiz_setup(rag):
                         if interface_lang == 'bn':
                             quiz_data = _translate_quiz(quiz_data, translator)
                         
+                        # Calculate time limit (1 minute per question)
+                        time_limit = int(num_questions) * 60
+                        
                         st.session_state.quiz_state = {
                             'active': True,
                             'data': quiz_data,
                             'user_answers': {},
                             'submitted': False,
                             'score': 0,
-                            'topic': topic,  # Keep original topic
-                            'difficulty': difficulty
+                            'topic': topic,
+                            'difficulty': difficulty,
+                            'start_time': datetime.now(),
+                            'time_limit': time_limit
                         }
+                        st.session_state.quiz_locked = True  # Lock navigation
                         st.rerun()
                     else:
                         st.error(get_ui_text('quiz_generation_error'))
@@ -219,9 +234,52 @@ def _translate_quiz(quiz_data: list, translator) -> list:
 
 
 def _render_quiz_form(from_study_plan=False):
-    """Render the quiz questions form"""
+    """Render the quiz questions form with timer"""
+    
+    # Inject tab visibility detector
+    _inject_tab_monitor()
+    
+    # Calculate time remaining
+    start_time = st.session_state.quiz_state.get('start_time')
+    time_limit = st.session_state.quiz_state.get('time_limit', 300)
+    
+    if start_time:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        remaining = max(0, time_limit - elapsed)
+        
+        # Display timer at the top
+        timer_col1, timer_col2 = st.columns([3, 1])
+        with timer_col2:
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            
+            if remaining > 60:
+                timer_color = "🟢"
+            elif remaining > 30:
+                timer_color = "🟡"
+            else:
+                timer_color = "🔴"
+            
+            st.markdown(f"### {timer_color} ⏱️ {minutes:02d}:{seconds:02d}")
+            
+            # Auto-submit when time runs out
+            if remaining <= 0 and not st.session_state.quiz_state['submitted']:
+                st.session_state.quiz_state['submitted'] = True
+                st.session_state.quiz_locked = False
+                # Save whatever answers exist
+                for i in range(len(st.session_state.quiz_state['data'])):
+                    val = st.session_state.get(f"q_{i}")
+                    st.session_state.quiz_state['user_answers'][i] = val
+                st.warning(get_ui_text('time_up'))
+                st.rerun()
+        
+        with timer_col1:
+            st.subheader(f"{get_ui_text('topic_label')}: {st.session_state.quiz_state.get('topic', 'General')}")
+    
     st.divider()
-    st.subheader(f"{get_ui_text('topic_label')}: {st.session_state.quiz_state.get('topic', 'General')}")
+    
+    # Warning message about navigation
+    st.info(f"⚠️ {get_ui_text('quiz_active_warning')}")
     
     with st.form(key='quiz_form'):
         questions = st.session_state.quiz_state['data']
@@ -240,16 +298,25 @@ def _render_quiz_form(from_study_plan=False):
             )
             st.write("")
 
-        submit_label = get_ui_text('submit_quiz') if not st.session_state.quiz_state['submitted'] else get_ui_text('update_answers')
-        submitted = st.form_submit_button(submit_label)
+        submit_label = get_ui_text('submit_quiz')
+        submitted = st.form_submit_button(submit_label, type="primary", use_container_width=True)
         
         if submitted:
             st.session_state.quiz_state['submitted'] = True
+            st.session_state.quiz_locked = False  # Unlock navigation
             # Save answers
             for i in range(len(questions)):
                 val = st.session_state.get(f"q_{i}")
                 st.session_state.quiz_state['user_answers'][i] = val
             st.rerun()
+    
+    # Use a container with auto-refresh for timer updates (only if not submitted)
+    if remaining > 0 and not st.session_state.quiz_state.get('submitted', False):
+        # Create an empty placeholder that auto-refreshes
+        placeholder = st.empty()
+        with placeholder.container():
+            time.sleep(1)
+        st.rerun()
 
 
 def _render_quiz_results(from_study_plan=False):
@@ -260,6 +327,14 @@ def _render_quiz_results(from_study_plan=False):
     questions = st.session_state.quiz_state['data']
     answers = st.session_state.quiz_state['user_answers']
     score = 0
+    
+    # Calculate final time taken
+    start_time = st.session_state.quiz_state.get('start_time')
+    if start_time:
+        time_taken = (datetime.now() - start_time).total_seconds()
+        minutes = int(time_taken // 60)
+        seconds = int(time_taken % 60)
+        st.info(f"⏱️ {get_ui_text('time_taken')}: {minutes}m {seconds}s")
     
     # Grade each question
     for i, q in enumerate(questions):
@@ -365,3 +440,145 @@ def _handle_study_plan_completion(percentage):
                     # Allow retry
                     part['quiz_score'] = percentage
                     st.warning(get_ui_text('retry_recommended'))
+
+
+def _inject_tab_monitor():
+    """Inject JavaScript for tab visibility monitoring"""
+    
+    # Initialize tab switch counter in session state
+    if 'tab_switches' not in st.session_state.quiz_state:
+        st.session_state.quiz_state['tab_switches'] = 0
+    
+    # Compact HTML/JS for tab monitoring
+    html_code = """
+    <!DOCTYPE html>
+<html>
+<head>
+    <style>
+        #visibility-warning {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #ff4444;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 18px;
+            z-index: 9999;
+            display: none;
+            animation: slideDown 0.3s ease-out;
+        }
+        
+        @keyframes slideDown {
+            from { transform: translateY(-100%); }
+            to { transform: translateY(0); }
+        }
+        
+        #tab-switch-counter {
+            position: fixed;
+            top: 60px;
+            right: 20px;
+            background: #ff9800;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: bold;
+            z-index: 9998;
+            display: none;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="visibility-warning">
+        ⚠️ WARNING: You switched tabs during the quiz! This has been recorded.
+    </div>
+    
+    <div id="tab-switch-counter">
+        🚨 Tab Switches: <span id="switch-count">0</span>
+    </div>
+
+    <script>
+        let switchCount = 0;
+        let isQuizActive = true; // Will be controlled by Streamlit
+        let warningTimeout;
+        
+        // Detect when user leaves/returns to tab
+        document.addEventListener('visibilitychange', function() {
+            if (isQuizActive && document.hidden) {
+                // User left the tab
+                switchCount++;
+                
+                // Update counter
+                document.getElementById('switch-count').textContent = switchCount;
+                document.getElementById('tab-switch-counter').style.display = 'block';
+                
+                // Send to Streamlit (if needed for logging)
+                if (window.parent && window.parent.postMessage) {
+                    window.parent.postMessage({
+                        type: 'tab_switch',
+                        count: switchCount,
+                        timestamp: new Date().toISOString()
+                    }, '*');
+                }
+            } else if (isQuizActive && !document.hidden) {
+                // User returned to tab - show warning
+                const warning = document.getElementById('visibility-warning');
+                warning.style.display = 'block';
+                
+                // Auto-hide after 3 seconds
+                clearTimeout(warningTimeout);
+                warningTimeout = setTimeout(() => {
+                    warning.style.display = 'none';
+                }, 3000);
+            }
+        });
+        
+        // Warn before closing/refreshing page
+        window.addEventListener('beforeunload', function(e) {
+            if (isQuizActive) {
+                e.preventDefault();
+                e.returnValue = 'You have an active quiz. Are you sure you want to leave?';
+                return e.returnValue;
+            }
+        });
+        
+        // Listen for quiz completion from Streamlit
+        window.addEventListener('message', function(event) {
+            if (event.data && event.data.type === 'quiz_completed') {
+                isQuizActive = false;
+                document.getElementById('tab-switch-counter').style.display = 'none';
+            }
+        });
+        
+        // Prevent right-click during quiz (optional - can be bypassed but adds friction)
+        document.addEventListener('contextmenu', function(e) {
+            if (isQuizActive) {
+                e.preventDefault();
+                alert('Right-click is disabled during the quiz');
+            }
+        });
+        
+        // Detect if user tries to open DevTools (F12, Ctrl+Shift+I, etc.)
+        document.addEventListener('keydown', function(e) {
+            if (isQuizActive) {
+                // F12 or Ctrl+Shift+I or Ctrl+Shift+J or Ctrl+U
+                if (e.keyCode === 123 || 
+                    (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74)) ||
+                    (e.ctrlKey && e.keyCode === 85)) {
+                    e.preventDefault();
+                    alert('Developer tools are disabled during the quiz');
+                    switchCount++;
+                    document.getElementById('switch-count').textContent = switchCount;
+                    document.getElementById('tab-switch-counter').style.display = 'block';
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+    """
+    
+    components.html(html_code, height=0)

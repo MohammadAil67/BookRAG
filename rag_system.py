@@ -1,7 +1,12 @@
 """
-Enhanced RAG System - Fixed Model Loading Issue
+Enhanced RAG System - With Metadata and Local Model Fallback
 
-FIX: Forces safetensors loading to avoid PyTorch 2.6 requirement
+Features:
+- Chapter, page, and section metadata tracking
+- Automatic fallback to local GGUF model when offline
+- Citation validation and semantic topic tracking
+- Smart metadata-aware retrieval
+- Clean, accurate page citations
 """
 
 import os
@@ -24,13 +29,15 @@ from topics import EnhancedTopicTracker, CitationValidator
 
 class RAGSystem:
     def __init__(self, config: Config):
-        print("🚀 Initializing Enhanced Tier 2+ RAG System...")
-        print("   ✨ Features: Semantic topic merging, Citation validation, Dynamic K")
+        print("🚀 Initializing RAG System...")
+        print("   🏠 Fallback: Local model support enabled")
         self.config = config
-        self.llm = GroqLLM(config.GROQ_API_KEY)
         
-        # 1. Load/Process PDF
-        self.chunks, self.embeddings = self._load_data()
+        # Initialize LLM with local model fallback support
+        self.llm = GroqLLM(config.GROQ_API_KEY, local_model_path=config.LOCAL_MODEL_PATH)
+        
+        # 1. Load/Process PDF with metadata
+        self.chunks, self.embeddings, self.chunk_metadata = self._load_data()
         
         # 2. Init Models
         self.embedder = Embedder(config)
@@ -69,24 +76,36 @@ class RAGSystem:
 
     def _load_data(self):
         """
-        Loads chunks and embeddings from cache or processes PDF.
-        FIXED: Uses safetensors to avoid PyTorch 2.6 requirement
+        Loads chunks, embeddings, and metadata from cache or processes PDF
         """
+        # Define cache files
+        metadata_file = self.config.CHUNKS_FILE.replace('.pkl', '_metadata.pkl')
+        
         # Check if cache exists
-        if os.path.exists(self.config.CHUNKS_FILE) and os.path.exists(self.config.EMBEDDINGS_FILE):
+        if (os.path.exists(self.config.CHUNKS_FILE) and 
+            os.path.exists(self.config.EMBEDDINGS_FILE) and
+            os.path.exists(metadata_file)):
             try:
                 print(f"📦 Loading cached data...")
                 with open(self.config.CHUNKS_FILE, 'rb') as f: 
                     chunks = pickle.load(f)
                 with open(self.config.EMBEDDINGS_FILE, 'rb') as f: 
                     embeddings = pickle.load(f)
-                print(f"📚 Loaded {len(chunks)} chunks from cache")
-                return chunks, embeddings
+                with open(metadata_file, 'rb') as f:
+                    chunk_metadata = pickle.load(f)
+                
+                print(f"📚 Loaded {len(chunks)} chunks with metadata from cache")
+                
+                # Show sample metadata
+                if chunk_metadata:
+                    print(f"   Sample: {chunk_metadata[0]}")
+                
+                return chunks, embeddings, chunk_metadata
             except Exception as e:
                 print(f"⚠️ Error loading cache: {e}. Re-processing...")
 
         # Process PDF
-        print("\n🔄 No cache found. Processing PDF...")
+        print("\n📄 No cache found. Processing PDF with metadata extraction...")
         try:
             from PDFprocessing import PDFProcess
             
@@ -95,19 +114,50 @@ class RAGSystem:
             if not poppler_path:
                 raise ValueError("Poppler not found. Please install Poppler.")
             
-            print(f"📍 Using Poppler at: {poppler_path}")
+            print(f"🔍 Using Poppler at: {poppler_path}")
             
-            # Process PDF with OCR (using 8 parallel workers for speed)
-            text = PDFProcess.process_pdf(self.config.PDF_PATH, poppler_path)  # Auto-detects optimal workers
-            chunks = PDFProcess.create_chunks(text)
+            # Ask user for PDF-to-book page offset
+            print("\n" + "="*60)
+            print("📖 PDF TO BOOK PAGE MAPPING")
+            print("="*60)
+            print("If your book starts at page 1 but the PDF starts at page 10,")
+            print("the offset would be -9 (to map PDF page 10 to book page 1).")
+            print("\nExamples:")
+            print("  - Book starts at PDF page 1: offset = 0")
+            print("  - Book starts at PDF page 10: offset = -9")
+            print("  - Book starts before PDF: offset = +5 (if book p.6 = PDF p.1)")
             
-            print(f"✅ Extracted {len(chunks)} chunks from PDF")
+            try:
+                offset_input = input("\nEnter PDF-to-Book page offset [default: 0]: ").strip()
+                pdf_to_book_offset = int(offset_input) if offset_input else 0
+            except ValueError:
+                print("⚠️ Invalid input, using offset = 0")
+                pdf_to_book_offset = 0
+            
+            print(f"✓ Using offset: {pdf_to_book_offset}")
+            print("="*60 + "\n")
+            
+            # Process PDF with metadata extraction
+            text_pages, page_metadata = PDFProcess.process_pdf(
+                self.config.PDF_PATH, 
+                poppler_path,
+                pdf_to_book_offset=pdf_to_book_offset
+            )
+            
+            # Create chunks with metadata
+            chunks, chunk_metadata = PDFProcess.create_chunks_with_metadata(
+                text_pages, 
+                page_metadata
+            )
+            
+            print(f"✅ Extracted {len(chunks)} chunks with metadata")
             
         except ImportError as e:
             print(f"⚠️ PDFprocessing module error: {e}")
             print("⚠️ Using dummy data for testing...")
             text = ["Dummy text content for testing purposes."]
             chunks = text
+            chunk_metadata = [None] * len(chunks)
         except Exception as e:
             print(f"❌ Error processing PDF: {e}")
             raise
@@ -115,11 +165,13 @@ class RAGSystem:
         try:
             print("⚙️ Generating embeddings (Quantized CPU Optimized)...")
             
-            # 1. Load the model normally
-            temp_embedder = SentenceTransformer('BAAI/bge-m3')
+            # Load and quantize model
+            temp_embedder = SentenceTransformer(
+                'BAAI/bge-m3',
+                cache_folder=self.config.MODEL_CACHE_DIR,
+                local_files_only=False 
+            )
             
-            # 2. Quantize the internal PyTorch module
-            # This makes it much faster on CPUs (Intel/AMD)
             temp_embedder[0].auto_model = torch.quantization.quantize_dynamic(
                 temp_embedder[0].auto_model, 
                 {torch.nn.Linear}, 
@@ -128,10 +180,10 @@ class RAGSystem:
             
             print("   ⚡ Model quantized to INT8 for speed")
 
-            # 3. Encode (Single threaded - let PyTorch handle the parallelism)
+            # Encode
             embeddings = temp_embedder.encode(
                 chunks,
-                batch_size=64,  # Increased batch size is safe with quantization
+                batch_size=64,
                 normalize_embeddings=True,
                 show_progress_bar=True,
                 convert_to_numpy=True
@@ -156,68 +208,132 @@ class RAGSystem:
                 pickle.dump(embeddings, f)
             print(f"   ✓ Saved embeddings to {self.config.EMBEDDINGS_FILE}")
             
+            with open(metadata_file, 'wb') as f:
+                pickle.dump(chunk_metadata, f)
+            print(f"   ✓ Saved metadata to {metadata_file}")
+            
         except Exception as e:
             print(f"⚠️ Warning: Could not save cache: {e}")
         
-        return chunks, embeddings
+        return chunks, embeddings, chunk_metadata
 
-    def _extract_entities(self, text: str) -> Set[str]:
-        """Extract Named Entities"""
-        pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
-        entities = re.findall(pattern, text)
-        stopwords = {
-            'According', 'The', 'This', 'That', 'These', 'Those', 'There', 'Here', 
-            'What', 'When', 'Where', 'Who', 'How', 'Answer', 
-            'Liberation', 'Language', 'War'
-        }
-        return set([e for e in entities if e not in stopwords])
-    
+    def _format_chunk_with_metadata(self, chunk_idx: int) -> str:
+        """Format a chunk with its metadata for display in prompts"""
+        chunk = self.chunks[chunk_idx]
+        metadata = self.chunk_metadata[chunk_idx] if chunk_idx < len(self.chunk_metadata) else None
+        
+        if metadata and metadata.book_page:
+            # Simple, clean header with just page number
+            header = f"[Page {metadata.book_page}]\n"
+            return header + chunk
+        else:
+            return f"[Chunk {chunk_idx}]\n" + chunk
+
+    def _get_primary_pages(self, chunk_indices: List[int], limit: int = 5) -> List[int]:
+        """Get the primary page numbers from retrieved chunks"""
+        if not self.chunk_metadata:
+            return []
+        
+        pages = []
+        for idx in chunk_indices[:limit]:  # Only check top chunks
+            if idx < len(self.chunk_metadata):
+                meta = self.chunk_metadata[idx]
+                if meta and meta.book_page and meta.book_page > 0:
+                    pages.append(meta.book_page)
+        
+        return sorted(set(pages))
+
+    def _get_metadata_summary(self, chunk_indices: List[int]) -> str:
+        """Get a clean summary of metadata from retrieved chunks"""
+        if not self.chunk_metadata:
+            return ""
+        
+        chapters = set()
+        pages = set()
+        
+        for idx in chunk_indices:
+            if idx < len(self.chunk_metadata):
+                meta = self.chunk_metadata[idx]
+                if meta:
+                    # Only add valid chapter names (filter out fragments)
+                    if meta.chapter and len(meta.chapter) > 15:  # Ignore short fragments
+                        # Clean up chapter names
+                        chapter = meta.chapter.strip()
+                        # Remove common OCR artifacts
+                        if not any(x in chapter.lower() for x in ['|', 'ici:', 'ic:', 'famousas', 'best movie']):
+                            chapters.add(chapter)
+                    
+                    # Add book page numbers
+                    if meta.book_page and meta.book_page > 0:
+                        pages.add(meta.book_page)
+        
+        summary_parts = []
+        
+        # Format chapters
+        if chapters:
+            clean_chapters = sorted(chapters)[:3]  # Limit to top 3 chapters
+            summary_parts.append(f"Chapter(s): {', '.join(clean_chapters)}")
+        
+        # Format pages
+        if pages:
+            page_list = sorted(pages)
+            if len(page_list) <= 5:
+                summary_parts.append(f"Page(s): {', '.join(map(str, page_list))}")
+            else:
+                # Show range for many pages
+                summary_parts.append(f"Pages: {page_list[0]}-{page_list[-1]}")
+        
+        return " | ".join(summary_parts) if summary_parts else ""
+
     def generate_quiz(self, topic: str, difficulty: str, num_questions: int) -> List[Dict]:
         """
-        Generates a structured quiz in JSON format based on the topic and PDF content.
+        Generates a structured quiz in JSON format based on the topic and PDF content
+        Now includes source citations with metadata
         """
         print(f"🎲 Generating {difficulty} quiz for topic: '{topic}'")
         
-        # 1. Retrieve relevant content specifically for the quiz
+        # 1. Retrieve relevant content
         search_query = f"facts concepts details about {topic}"
         chunk_indices = self.retriever.retrieve(search_query, [])
-        context_chunks = [self.chunks[i] for i in chunk_indices[:5]]
         
-        context_text = "\n\n".join(context_chunks)
+        # Format chunks with metadata
+        formatted_chunks = [self._format_chunk_with_metadata(i) for i in chunk_indices[:5]]
+        context_text = "\n\n".join(formatted_chunks)
+        
+        # Get primary pages
+        primary_pages = self._get_primary_pages(chunk_indices[:5])
+        if primary_pages:
+            print(f"   📖 Retrieved from pages: {', '.join(map(str, primary_pages))}")
         
         # 2. Construct the strict JSON prompt
         prompt = f"""
-        Based strictly on the provided text context, generate {num_questions} multiple-choice questions (MCQs) about "{topic}".
-        Difficulty Level: {difficulty}
+Based strictly on the provided text context, generate {num_questions} multiple-choice questions (MCQs) about "{topic}".
+Difficulty Level: {difficulty}
 
-        CONTEXT:
-        {context_text}
+CONTEXT:
+{context_text}
 
-        OUTPUT FORMAT:
-        You must return a valid JSON array of objects. Do not wrap in markdown code blocks. Do not add introductory text.
-        
-        JSON Structure:
-        [
-            {{
-                "id": 1,
-                "question": "Question text here?",
-                "options": ["Option A", "Option B", "Option C", "Option D"],
-                "correct_answer": "Option A",
-                "explanation": "Brief explanation from text."
-            }}
-        ]
+OUTPUT FORMAT:
+You must return a valid JSON array of objects. Do not wrap in markdown code blocks. Do not add introductory text.
 
-        RULES:
-        1. "correct_answer" must be an exact string match to one of the "options".
-        2. "explanation" must explain WHY the answer is correct based on the text.
-        3. Do not use outside knowledge; strictly use the provided context.
-<<<<<<< HEAD
-        4. If the topic is mathematical and if there are mathematical data in the context, include at least one math-related question.
-=======
-        4. If there are mathematical data in the context, include at least one math-related question.
->>>>>>> ab0fe7484f3c26cf6bd1ff2344649e4b20cb02e2
-        5. And if it is a mathematical question the answer should not be from the context.
-        """
+JSON Structure:
+[
+    {{
+        "id": 1,
+        "question": "Question text here?",
+        "options": ["Option A", "Option B", "Option C", "Option D"],
+        "correct_answer": "Option A",
+        "explanation": "Brief explanation from text."
+    }}
+]
+
+RULES:
+1. "correct_answer" must be an exact string match to one of the "options".
+2. "explanation" must explain WHY the answer is correct based on the text.
+3. Do not use outside knowledge; strictly use the provided context.
+4. If the topic is mathematical and there are mathematical data in the context, include at least one math-related question.
+5. For math questions, the answer should involve calculation, not direct text lookup.
+"""
 
         try:
             response = self.llm.generate(prompt)
@@ -227,7 +343,7 @@ class RAGSystem:
             
         except json.JSONDecodeError:
             print("⚠️ Failed to parse Quiz JSON. Returning empty list.")
-            print(f"Raw output: {response}")
+            print(f"Raw output: {response[:200]}...")
             return []
         except Exception as e:
             print(f"⚠️ Quiz generation error: {e}")
@@ -235,7 +351,7 @@ class RAGSystem:
 
     # --- MAIN PIPELINE ---
     def ask(self, query: str) -> str:
-        """Main query pipeline with intelligent routing."""
+        """Main query pipeline with intelligent routing and metadata"""
         print(f"\n🔍 Processing: '{query}'")
         
         should_decompose, decomp_type = self.decomposer.should_decompose(query)
@@ -248,7 +364,7 @@ class RAGSystem:
             return self._ask_simple(query)
     
     def _ask_simple(self, query: str) -> str:
-        """Standard pipeline with citation validation and dynamic K."""
+        """Standard pipeline with citation validation and clean metadata"""
         topic_context = self.context_applier.get_smart_context(query)
         
         if topic_context:
@@ -262,12 +378,20 @@ class RAGSystem:
         chunk_indices = self.retriever.retrieve(refined_query, self.chat_history)
         retrieved_chunks = [self.chunks[i] for i in chunk_indices]
         
+        # Get clean page numbers from top chunks
+        primary_pages = self._get_primary_pages(chunk_indices, limit=5)
+        
         print(f"  📦 Retrieved {len(retrieved_chunks)} chunks")
+        if primary_pages:
+            print(f"  📖 Primary sources: Pages {', '.join(map(str, primary_pages))}")
         
         if not retrieved_chunks:
             return "I couldn't find any relevant information in the document."
         
-        prompt = PromptBuilder.build(refined_query, retrieved_chunks, self.chat_history)
+        # Format chunks with simple page headers
+        formatted_chunks = [self._format_chunk_with_metadata(i) for i in chunk_indices]
+        
+        prompt = PromptBuilder.build(refined_query, formatted_chunks, self.chat_history)
         answer = self.llm.generate(prompt)
         
         is_grounded, supporting_chunks, confidence = \
@@ -280,13 +404,23 @@ class RAGSystem:
             strict_prompt = prompt + "\n\nCRITICAL INSTRUCTION: The previous answer was rejected because it included information not found in the text. You must cite specific details from the context provided above."
             answer = self.llm.generate(strict_prompt)
         
+        # Append clean source citation
+        show_sources = getattr(self.config, 'SHOW_SOURCES', True)
+        if primary_pages and show_sources:
+            if len(primary_pages) == 1:
+                answer += f"\n\n*Source: Page {primary_pages[0]}*"
+            elif len(primary_pages) <= 3:
+                answer += f"\n\n*Sources: Pages {', '.join(map(str, primary_pages))}*"
+            else:
+                answer += f"\n\n*Sources: Pages {primary_pages[0]}-{primary_pages[-1]}*"
+        
         self._update_history(query, answer)
         self.topic_tracker.update(query, answer)
         
         return answer
     
     def _ask_with_decomposition(self, query: str) -> str:
-        """Handle complex queries with citation validation."""
+        """Handle complex queries with citation validation and clean metadata"""
         decomp_result = self.decomposer.decompose(query)
         sub_queries = decomp_result.sub_queries
         
@@ -301,7 +435,11 @@ class RAGSystem:
             all_chunk_indices.update(chunk_indices)
         
         unique_chunks = [self.chunks[i] for i in all_chunk_indices]
+        primary_pages = self._get_primary_pages(list(all_chunk_indices), limit=5)
+        
         print(f"  📦 Total unique chunks: {len(unique_chunks)}")
+        if primary_pages:
+            print(f"  📖 Sources: Pages {', '.join(map(str, primary_pages))}")
         
         if not unique_chunks:
             return "I couldn't find any relevant information in the document."
@@ -309,14 +447,19 @@ class RAGSystem:
         if len(unique_chunks) > self.config.FINAL_TOP_K:
             print(f"  🎯 Reranking {len(unique_chunks)} chunks...")
             reranked = self.reranker.rerank(query, unique_chunks, self.config.FINAL_TOP_K)
+            final_indices = [list(all_chunk_indices)[idx] for idx, score in reranked]
             final_chunks = [unique_chunks[idx] for idx, score in reranked]
         else:
+            final_indices = list(all_chunk_indices)
             final_chunks = unique_chunks
+        
+        # Format with metadata
+        formatted_chunks = [self._format_chunk_with_metadata(i) for i in final_indices]
         
         prompt = self._build_decomposed_prompt(
             original_query=query,
             sub_queries=sub_queries,
-            chunks=final_chunks,
+            chunks=formatted_chunks,
             decomp_type=decomp_result.decomposition_type
         )
         
@@ -331,6 +474,16 @@ class RAGSystem:
             print(f"  ⚠️ Low grounding. Regenerating...")
             prompt += "\n\nCRITICAL: Answer ONLY using provided context. Cite specific details."
             answer = self.llm.generate(prompt)
+        
+        # Append clean source citation
+        show_sources = getattr(self.config, 'SHOW_SOURCES', True)
+        if primary_pages and show_sources:
+            if len(primary_pages) == 1:
+                answer += f"\n\n*Source: Page {primary_pages[0]}*"
+            elif len(primary_pages) <= 3:
+                answer += f"\n\n*Sources: Pages {', '.join(map(str, primary_pages))}*"
+            else:
+                answer += f"\n\n*Sources: Pages {primary_pages[0]}-{primary_pages[-1]}*"
         
         self._update_history(query, answer)
         self.topic_tracker.update(query, answer)
@@ -388,7 +541,7 @@ Original Question: {original_query}
 Sub-questions:
 {chr(10).join(f"{i+1}. {sq}" for i, sq in enumerate(sub_queries))}
 
-Context from the document:
+Context from the document (with source metadata):
 {context_text}
 
 Previous conversation:
@@ -425,8 +578,18 @@ Answer:"""
         print("🗑️ History cleared")
 
     def get_system_stats(self) -> Dict:
-        """More comprehensive statistics"""
+        """More comprehensive statistics including model status and metadata"""
         current_topic = self.topic_tracker.get_current_topic()
+        
+        # Check which model is being used
+        model_status = "🌐 Online (Groq API)" if not self.llm.using_local else "🏠 Local (Offline)"
+        
+        # Count chapters
+        unique_chapters = set()
+        if self.chunk_metadata:
+            for meta in self.chunk_metadata:
+                if meta and meta.chapter:
+                    unique_chapters.add(meta.chapter)
         
         return {
             'total_chunks': len(self.chunks),
@@ -436,5 +599,50 @@ Answer:"""
             'current_topic_confidence': current_topic.confidence if current_topic else 0.0,
             'entity_mentions': dict(current_topic.entity_mentions) if current_topic else {},
             'last_intent': self.topic_tracker.last_intent,
-            'total_entities_tracked': len(self.topic_tracker.entity_history)
+            'total_entities_tracked': len(self.topic_tracker.entity_history),
+            'model_status': model_status,
+            'local_model_available': self.llm.local_model_path is not None,
+            'chapters_in_document': len(unique_chapters),
+            'has_metadata': bool(self.chunk_metadata)
         }
+    
+    def switch_to_local(self):
+        """Manually switch to local model"""
+        return self.llm.force_local()
+    
+    def switch_to_online(self):
+        """Manually switch to online model"""
+        self.llm.force_online()
+    
+    def search_by_metadata(self, chapter: str = None, page_range: Tuple[int, int] = None) -> List[int]:
+        """
+        Search chunks by metadata
+        
+        Args:
+            chapter: Chapter name to filter by
+            page_range: Tuple of (start_page, end_page) to filter by
+        
+        Returns:
+            List of chunk indices matching criteria
+        """
+        if not self.chunk_metadata:
+            return []
+        
+        matching_indices = []
+        
+        for i, meta in enumerate(self.chunk_metadata):
+            if not meta:
+                continue
+            
+            # Check chapter match
+            if chapter and meta.chapter and chapter.lower() in meta.chapter.lower():
+                matching_indices.append(i)
+                continue
+            
+            # Check page range match
+            if page_range and meta.book_page:
+                start, end = page_range
+                if start <= meta.book_page <= end:
+                    matching_indices.append(i)
+        
+        return matching_indices

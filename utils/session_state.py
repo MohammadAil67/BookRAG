@@ -1052,6 +1052,26 @@ def get_ui_text(key: str) -> str:
         'topic_to_practice': {
             'en': 'Topic to Practice',
             'bn': 'অনুশীলনের বিষয়'
+        },
+        'time_up': {
+        'en': '⏰ Time is up! Quiz submitted automatically.',
+        'bn': '⏰ সময় শেষ! কুইজ স্বয়ংক্রিয়ভাবে জমা দেওয়া হয়েছে।'
+        },
+        'time_taken': {
+            'en': 'Time Taken',
+            'bn': 'সময় লেগেছে'
+        },
+        'quiz_active_warning': {
+            'en': 'Quiz is active! You cannot navigate to other sections until you submit your answers.',
+            'bn': 'কুইজ সক্রিয়! আপনার উত্তর জমা না দেওয়া পর্যন্ত আপনি অন্য বিভাগে যেতে পারবেন না।'
+        },
+        'm': {
+            'en': 'm',
+            'bn': 'মি'
+        },
+        's': {
+            'en': 's',
+            'bn': 'সে'
         }
     }
     

@@ -31,7 +31,7 @@ RULES:
 1. Use ONLY the provided Context to answer.
 2. If the answer is not in the Context, say "I cannot find the answer in the provided text."
 3. Cite your sources implicitly (e.g., "According to the text...").
-4. Be concise but comprehensive.
+4. Be detailed.
 """
     
     @staticmethod

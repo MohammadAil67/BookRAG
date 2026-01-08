@@ -130,33 +130,54 @@ def _generate_automatic_plan(quiz_results):
     with st.spinner(get_ui_text('analyzing_progress')):
         rag = st.session_state.rag_system
         
-        # Prepare analysis prompt
-        analysis_prompt = f"""Based on this student's learning data, create a personalized study plan.
+        # Convert datetime objects to strings for JSON serialization
+        serializable_results = []
+        for result in quiz_results[-10:]:
+            serializable_result = result.copy()
+            # Convert any datetime objects to ISO format strings
+            for key, value in serializable_result.items():
+                if isinstance(value, datetime):
+                    serializable_result[key] = value.isoformat()
+            serializable_results.append(serializable_result)
+        
+        # Get weak topics from quiz history
+        weak_topics = [q['topic'] for q in quiz_results[-10:] if q.get('score', 0) < 70]
+        covered_topics = list(set([q['topic'] for q in quiz_results[-10:]]))
+        weak_areas = list(set(weak_topics))
+        
+        # Build weak areas context
+        weak_areas_text = ", ".join(weak_areas[:5]) if weak_areas else "General review needed"
+        covered_text = ", ".join(covered_topics[:5]) if covered_topics else "None yet"
+        
+        # Prepare improved analysis prompt with document context
+        analysis_prompt = f"""IMPORTANT: Create a study plan ONLY using topics and concepts actually present in the provided document.
 
-Quiz Performance:
-{json.dumps(quiz_results[-10:], indent=2)}
+Student Performance Analysis:
+- Recently covered topics: {covered_text}
+- Areas with <70% scores: {weak_areas_text}
+- Total quizzes completed: {len(quiz_results)}
 
-Student needs:
-1. Identify 4-5 topics they are weak at or haven't covered
-2. For each topic, break it into 3-4 progressive parts/lessons
-3. Prioritize weak areas first
-4. Each part should have:
-   - Clear learning objectives
-   - Estimated study time (15-30 mins)
-   - Key concepts to master
+Your task:
+1. Identify 3-5 related topics from the document that would help strengthen weak areas
+2. These topics MUST be found in the document content
+3. Break each topic into 3-4 progressive, sequential parts
+4. Start with fundamental concepts and progress to advanced
+5. Each part must have realistic objectives that appear in the document
 
-Respond in JSON format:
+CRITICAL: Only suggest topics that are clearly present in the provided document context.
+
+Respond ONLY with valid JSON (no markdown, no extra text):
 {{
   "topics": [
     {{
       "name": "Topic Name",
-      "priority": "high/medium/low",
-      "reason": "Why this topic is important",
+      "priority": "high",
+      "reason": "Why this helps student progress",
       "parts": [
         {{
           "part_number": 1,
           "title": "Part Title",
-          "objectives": ["objective1", "objective2"],
+          "objectives": ["Understand concept X", "Learn principle Y"],
           "estimated_time": 20,
           "key_concepts": ["concept1", "concept2"]
         }}
@@ -165,48 +186,80 @@ Respond in JSON format:
   ]
 }}"""
         
-        # Get plan from RAG
+        # Get response from RAG
         response = rag.ask(analysis_prompt)
         
-        # Parse JSON response
+        # Parse JSON response with better error handling
         try:
-            # Extract JSON from response
             import re
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                plan_data = json.loads(json_match.group())
+            
+            # Extract JSON - be more strict
+            json_match = re.search(r'\{[\s\S]*\}', response, re.DOTALL)
+            if not json_match:
+                st.error("❌ Could not parse study plan. Please try again.")
+                return
+            
+            json_str = json_match.group()
+            
+            # Validate and clean JSON
+            plan_data = json.loads(json_str)
+            
+            # Validate structure
+            if not plan_data.get('topics') or not isinstance(plan_data['topics'], list):
+                st.error("❌ Invalid plan structure. Please try again.")
+                return
+            
+            if len(plan_data['topics']) == 0:
+                st.error("❌ No topics generated. Please try again.")
+                return
+            
+            # Validate each topic has required fields
+            for topic in plan_data['topics']:
+                if not all(k in topic for k in ['name', 'parts']):
+                    st.error("❌ Invalid topic structure. Missing required fields.")
+                    return
+                if not topic['parts']:
+                    st.error("❌ Topics must have at least one part.")
+                    return
                 
-                # Translate to Bengali if needed
-                if interface_lang == 'bn':
-                    plan_data = _translate_plan_data(plan_data, translator)
-                
-                # Initialize plan with completion tracking
-                topics = []
-                for topic in plan_data['topics']:
-                    topic_obj = {
-                        **topic,
-                        'completed': False,
-                        'current_part': 0,
-                        'parts_status': [
-                            {
-                                **part,
-                                'completed': False,
-                                'quiz_score': None,
-                                'attempts': 0
-                            }
-                            for part in topic['parts']
-                        ]
-                    }
-                    topics.append(topic_obj)
-                
-                st.session_state.study_plan_data['topics'] = topics
-                st.session_state.study_plan_data['created'] = datetime.now()
-                st.success(get_ui_text('plan_generated'))
-                st.rerun()
-            else:
-                st.error(get_ui_text('plan_generation_failed'))
+                # Validate each part
+                for part in topic['parts']:
+                    if not all(k in part for k in ['title', 'objectives', 'estimated_time', 'key_concepts']):
+                        st.error("❌ Invalid part structure. Missing required fields.")
+                        return
+            
+            # Translate to Bengali if needed
+            if interface_lang == 'bn':
+                plan_data = _translate_plan_data(plan_data, translator)
+            
+            # Initialize plan with completion tracking
+            topics = []
+            for topic in plan_data['topics']:
+                topic_obj = {
+                    **topic,
+                    'completed': False,
+                    'current_part': 0,
+                    'parts_status': [
+                        {
+                            **part,
+                            'completed': False,
+                            'quiz_score': None,
+                            'attempts': 0
+                        }
+                        for part in topic['parts']
+                    ]
+                }
+                topics.append(topic_obj)
+            
+            st.session_state.study_plan_data['topics'] = topics
+            st.session_state.study_plan_data['created'] = datetime.now()
+            st.success("✅ " + get_ui_text('plan_generated'))
+            st.rerun()
+            
+        except json.JSONDecodeError as e:
+            st.error(f"❌ Failed to parse plan (JSON error): {str(e)[:100]}")
         except Exception as e:
-            st.error(f"{get_ui_text('error')}: {str(e)}")
+            st.error(f"❌ {get_ui_text('error')}: {str(e)[:100]}")
 
 
 def _render_manual_creation():
@@ -260,19 +313,28 @@ def _create_manual_plan(topics_input, duration, parts_per_topic):
         # Generate structured plan
         topics_list = [t.strip() for t in topics_for_processing.split('\n') if t.strip()]
         
-        prompt = f"""Create a detailed study plan for these topics:
+        if not topics_list:
+            st.error("❌ Please enter at least one topic")
+            return
+        
+        prompt = f"""Create a detailed study plan for these topics from the provided document:
 {chr(10).join(f'{i+1}. {t}' for i, t in enumerate(topics_list))}
 
-For each topic, create {parts_per_topic} progressive parts/lessons.
+CRITICAL RULES:
+1. Only use topics and concepts actually present in the document
+2. Create exactly {parts_per_topic} parts for each topic
+3. Each part must build on previous ones progressively
+4. Parts must align with document structure and content
+
 Duration: {duration}
 
 For each part, provide:
-- Clear title
-- Learning objectives (2-3 points)
-- Estimated study time (15-30 minutes)
-- Key concepts to master
+- Clear, specific title
+- 2-3 learning objectives directly from document
+- Realistic estimated study time (15-30 minutes)
+- 2-4 key concepts actually found in the document
 
-Respond in JSON format:
+Respond ONLY with valid JSON (no markdown, no extra text):
 {{
   "topics": [
     {{
@@ -295,39 +357,71 @@ Respond in JSON format:
         
         try:
             import re
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                plan_data = json.loads(json_match.group())
+            
+            # Extract JSON - be more strict
+            json_match = re.search(r'\{[\s\S]*\}', response, re.DOTALL)
+            if not json_match:
+                st.error("❌ Could not parse plan. Please try again.")
+                return
+            
+            json_str = json_match.group()
+            plan_data = json.loads(json_str)
+            
+            # Validate structure
+            if not plan_data.get('topics') or not isinstance(plan_data['topics'], list):
+                st.error("❌ Invalid plan structure. Please try again.")
+                return
+            
+            if len(plan_data['topics']) < len(topics_list):
+                st.warning(f"⚠️ Only {len(plan_data['topics'])} of {len(topics_list)} topics could be created from the document.")
+            
+            # Validate each topic
+            for i, topic in enumerate(plan_data['topics']):
+                if not all(k in topic for k in ['name', 'parts']):
+                    st.error(f"❌ Topic {i+1} missing required fields")
+                    return
                 
-                # Translate back to Bengali if needed
-                if interface_lang == 'bn':
-                    plan_data = _translate_plan_data(plan_data, translator)
+                if len(topic['parts']) != parts_per_topic:
+                    st.warning(f"⚠️ Topic '{topic['name']}' has {len(topic['parts'])} parts instead of {parts_per_topic}")
                 
-                # Initialize with tracking
-                topics = []
-                for topic in plan_data['topics']:
-                    topic_obj = {
-                        **topic,
-                        'completed': False,
-                        'current_part': 0,
-                        'parts_status': [
-                            {
-                                **part,
-                                'completed': False,
-                                'quiz_score': None,
-                                'attempts': 0
-                            }
-                            for part in topic['parts']
-                        ]
-                    }
-                    topics.append(topic_obj)
-                
-                st.session_state.study_plan_data['topics'] = topics
-                st.session_state.study_plan_data['created'] = datetime.now()
-                st.success(get_ui_text('plan_created'))
-                st.rerun()
+                # Validate parts
+                for part in topic['parts']:
+                    if not all(k in part for k in ['title', 'objectives', 'estimated_time', 'key_concepts']):
+                        st.error(f"❌ Part '{part.get('title', 'Unknown')}' missing required fields")
+                        return
+            
+            # Translate back to Bengali if needed
+            if interface_lang == 'bn':
+                plan_data = _translate_plan_data(plan_data, translator)
+            
+            # Initialize with tracking
+            topics = []
+            for topic in plan_data['topics']:
+                topic_obj = {
+                    **topic,
+                    'completed': False,
+                    'current_part': 0,
+                    'parts_status': [
+                        {
+                            **part,
+                            'completed': False,
+                            'quiz_score': None,
+                            'attempts': 0
+                        }
+                        for part in topic['parts']
+                    ]
+                }
+                topics.append(topic_obj)
+            
+            st.session_state.study_plan_data['topics'] = topics
+            st.session_state.study_plan_data['created'] = datetime.now()
+            st.success("✅ " + get_ui_text('plan_created'))
+            st.rerun()
+            
+        except json.JSONDecodeError as e:
+            st.error(f"❌ Failed to parse plan (JSON error): {str(e)[:100]}")
         except Exception as e:
-            st.error(f"{get_ui_text('error')}: {str(e)}")
+            st.error(f"❌ {get_ui_text('error')}: {str(e)[:100]}")
 
 
 def _render_plan_dashboard():

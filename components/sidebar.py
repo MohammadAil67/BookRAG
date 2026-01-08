@@ -1,6 +1,7 @@
 # sidebar.py
 """
 Sidebar component for navigation and system status
+Enhanced with quiz navigation restrictions
 """
 import streamlit as st
 
@@ -45,46 +46,69 @@ def render_sidebar():
         
         st.divider()
 
+        # Check if quiz is active and not submitted
+        quiz_locked = st.session_state.get('quiz_locked', False)
+        
         # Navigation
         nav_label = "Navigation" if st.session_state.interface_language == 'en' else "নেভিগেশন"
         st.markdown(f"### {nav_label}")
         
+        # Show warning if quiz is active
+        if quiz_locked:
+            warning_msg = "⚠️ Quiz in progress - navigation locked" if st.session_state.interface_language == 'en' else "⚠️ কুইজ চলছে - নেভিগেশন লক করা"
+            st.warning(warning_msg)
+        
         nav_options = {
-            'en': ['Chat', 'Practice', 'Study Plan', 'Progress Tracker', 'System Logs'],
-            'bn': ['চ্যাট', 'অনুশীলন', 'পড়াশোনার পরিকল্পনা', 'অগ্রগতি ট্র্যাকার', 'সিস্টেম লগ']
+            'en': ['Chat', 'Practice', 'Study Plan', 'Progress Tracker'],
+            'bn': ['চ্যাট', 'অনুশীলন', 'পড়াশোনার পরিকল্পনা', 'অগ্রগতি ট্র্যাকার']
         }
         
         # Base English options used for logic/indexing
-        english_options = ['Chat', 'Practice', 'Study Plan', 'Progress Tracker', 'System Logs']
+        english_options = ['Chat', 'Practice', 'Study Plan', 'Progress Tracker']
         
         # Map Bengali back to English keys for routing
         option_map = {
             'চ্যাট': 'Chat',
             'অনুশীলন': 'Practice',
             'পড়াশোনার পরিকল্পনা': 'Study Plan',
-            'অগ্রগতি ট্র্যাকার': 'Progress Tracker',
-            'সিস্টেম লগ': 'System Logs'
+            'অগ্রগতি ট্র্যাকার': 'Progress Tracker'
         }
         
-        # --- FIX STARTS HERE ---
         # Calculate the index based on the CURRENT session state view
-        # This forces the radio button to visually update when we change views programmatically
         try:
             current_index = english_options.index(st.session_state.view)
         except ValueError:
             current_index = 0
 
-        selected_view = st.radio(
-            "Go to",
-            nav_options[st.session_state.interface_language],
-            index=current_index,  # <--- Pass the calculated index here
-            label_visibility="collapsed"
-        )
-        # --- FIX ENDS HERE ---
-        
-        # Convert Bengali selection back to English for routing
-        if st.session_state.interface_language == 'bn':
-            selected_view = option_map.get(selected_view, 'Chat')
+        # If quiz is locked, disable navigation by forcing Practice view
+        if quiz_locked:
+            # Force Practice view
+            selected_view = st.radio(
+                "Go to",
+                nav_options[st.session_state.interface_language],
+                index=english_options.index('Practice'),
+                label_visibility="collapsed",
+                disabled=False  # Keep enabled but we'll override the selection
+            )
+            
+            # Always return Practice when locked
+            selected_view = 'Practice'
+            
+            # Show helper text
+            helper_text = "Complete or submit the quiz to unlock navigation" if st.session_state.interface_language == 'en' else "নেভিগেশন আনলক করতে কুইজ সম্পূর্ণ বা জমা দিন"
+            st.caption(f"ℹ️ {helper_text}")
+        else:
+            # Normal navigation
+            selected_view = st.radio(
+                "Go to",
+                nav_options[st.session_state.interface_language],
+                index=current_index,
+                label_visibility="collapsed"
+            )
+            
+            # Convert Bengali selection back to English for routing
+            if st.session_state.interface_language == 'bn':
+                selected_view = option_map.get(selected_view, 'Chat')
         
         st.divider()
 
@@ -105,14 +129,14 @@ def render_sidebar():
                 col1, col2 = st.columns(2)
                 with col1:
                     reload_btn = "🔄 Reload" if st.session_state.interface_language == 'en' else "🔄 রিলোড"
-                    if st.button(reload_btn):
+                    if st.button(reload_btn, disabled=quiz_locked):
                         st.cache_resource.clear()
                         st.session_state.rag_system = None
                         st.rerun()
                 
                 with col2:
                     clear_btn = "🗑️ Clear" if st.session_state.interface_language == 'en' else "🗑️ মুছুন"
-                    if st.button(clear_btn):
+                    if st.button(clear_btn, disabled=quiz_locked):
                         st.session_state.rag_system.clear_history()
                         st.session_state.messages = []
                         success_clear = "History cleared!" if st.session_state.interface_language == 'en' else "ইতিহাস মুছে ফেলা হয়েছে!"
@@ -131,15 +155,15 @@ def render_sidebar():
             st.markdown("""
             <div style="text-align: center;">
                 <div style="background-color: #3b82f6; color: white; width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; margin: 0 auto;">AS</div>
-                <h3>Alex Smith</h3>
-                <p style="color: gray;">Grade 10 Student</p>
+                <h3>Karim</h3>
+                <p style="color: gray;">Class 9 Student</p>
             </div>
             """, unsafe_allow_html=True)
             
             email_label = "📧 Email:" if st.session_state.interface_language == 'en' else "📧 ইমেইল:"
             score_label = "🏆 Score:" if st.session_state.interface_language == 'en' else "🏆 স্কোর:"
             
-            st.write(f"**{email_label}** alex.smith@school.edu")
-            st.write(f"**{score_label}** 1,247 points")
+            st.write(f"**{email_label}** karim@example.com")
+            st.write(f"**{score_label}** 0 points")
 
         return selected_view
